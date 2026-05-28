@@ -1,0 +1,15 @@
+database,table,partition,column,principal_name,principal_type,privilege,grant_option,grant_time,grantor
+bk_000db,tbl_bk000_bisvc_dim_ins,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1601002231000,--
+bk_000db,viw_bk000_app_events_d_flow_01363043,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1638237627000,--
+bk_000db,viw_bk000_bialy_dim_hr_assess_2020_scene_para,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1600422739000,--
+bk_000db,viw_bk000_bialy_dim_hr_assess_2020_scene_point_para,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1600431103000,--
+bk_000db,viw_bk000_bialy_dim_hr_assess_2020_ysf_in_mchnt_inf,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1600458723000,--
+bk_000db,viw_bk000_bialy_dim_hr_assess_2020_ysf_out_delete_mchnt,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1600427709000,--
+bk_000db,viw_bk000_bisvc_dim_all_chnl_mchnt_branch,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1600423546000,--
+bk_000db,viw_bk000_bisvc_dim_card_bin,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1600423128000,--
+bk_000db,viw_bk000_bisvc_dim_card_brand,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1600432552000,--
+bk_000db,viw_bk000_bisvc_dim_customlevel,,,bdhbdkp01363043_role,ROLE,SELECT,FALSE,1600421623000,--
+/user/000YJS/bdhbdkp01363043/bdkp,,,,bdhbdkp01363043_role,ROLE,*,FALSE,1605666285000,--
+/user/000YJS/bdhbdkp01363043/bdkp/db,,,,bdhbdkp01363043_role,ROLE,*,FALSE,1605666287000,--
+/user/lib,,,,bdhbdkp01363043_role,ROLE,*,FALSE,1563286021000,--
+file:///tmp,,,,bdhbdkp01363043_role,ROLE,*,FALSE,1537962714000,--
