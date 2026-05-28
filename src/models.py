@@ -47,6 +47,7 @@ class ResourcePath:
     service_type: ServiceType
     database: Optional[str] = None
     table: Optional[str] = None
+    partition: Optional[str] = None
     column: Optional[str] = None
     path: Optional[str] = None
 
@@ -57,7 +58,13 @@ class ResourcePath:
         HDFS: path as-is
         """
         if self.service_type == ServiceType.HDFS:
-            return [self.path or "/"]
+            raw_path = self.path or "/"
+            if raw_path == "*" or raw_path.upper() == "GLOBAL":
+                return ["GLOBAL"]
+            path_parts = raw_path.split("/")
+            return ["PATH", "/"] + [
+                part for part in path_parts if part and part != "hdfs:"
+            ]
         # Hive / table-based
         if not self.database or self.database == "*" or self.database == "GLOBAL":
             return ["GLOBAL"]
@@ -66,6 +73,8 @@ class ResourcePath:
             parts.append(self.database)
         if self.table:
             parts.append(self.table)
+        if self.partition:
+            parts.append(self.partition)
         if self.column:
             parts.append(self.column)
         return parts

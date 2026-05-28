@@ -29,6 +29,7 @@ Ranger JSON format (from Ranger_export_example.json):
 from __future__ import annotations
 
 import json
+import itertools
 from typing import Any, Optional
 
 try:
@@ -111,40 +112,60 @@ def _collect_principals(item: dict) -> list[Principal]:
 
 # ── Resource building ───────────────────────────────────────────────────────
 
-def _safe_first(values: Optional[list], default: str = "*") -> str:
-    if values and values[0] and values[0] != "*":
-        return values[0]
-    return default
+def _resource_values(resources: dict[str, Any], key: str, default: str = "*") -> list[str]:
+    spec = resources.get(key)
+    if not isinstance(spec, dict):
+        return [default]
+    values = spec.get("values") or [default]
+    cleaned = [v for v in values if v]
+    return cleaned or [default]
 
 
-def _build_resource(
+def _build_resources(
     service_type: ServiceType,
     resources: dict[str, Any],
-) -> ResourcePath:
+) -> list[ResourcePath]:
     st = service_type
 
     if st == ServiceType.HIVE:
-        return ResourcePath(
-            service_type=st,
-            database=_safe_first(resources.get("database", {}).get("values") if isinstance(resources.get("database"), dict) else None),
-            table=_safe_first(resources.get("table", {}).get("values") if isinstance(resources.get("table"), dict) else None),
-            column=_safe_first(resources.get("column", {}).get("values") if isinstance(resources.get("column"), dict) else None),
-        )
+        if "url" in resources:
+            return [
+                ResourcePath(service_type=ServiceType.HDFS, path=url)
+                for url in _resource_values(resources, "url", "/")
+            ]
+        if "database" not in resources:
+            return []
+        result: list[ResourcePath] = []
+        for database, table, column in itertools.product(
+            _resource_values(resources, "database"),
+            _resource_values(resources, "table", ""),
+            _resource_values(resources, "column", ""),
+        ):
+            result.append(ResourcePath(
+                service_type=st,
+                database=database,
+                table="" if table == "*" else table,
+                column="" if column == "*" else column,
+            ))
+        return result
 
     if st == ServiceType.HDFS:
-        return ResourcePath(
-            service_type=st,
-            path=_safe_first(resources.get("path", {}).get("values") if isinstance(resources.get("path"), dict) else None, "/"),
-        )
+        return [
+            ResourcePath(service_type=st, path=path)
+            for path in _resource_values(resources, "path", "/")
+        ]
 
     # Generic fallback for other service types
-    return ResourcePath(service_type=st)
+    return []
 
 
 # ── Main parser ─────────────────────────────────────────────────────────────
 
 def parse_ranger_policy(raw: dict) -> Optional[Policy]:
     """Convert a single Ranger policy dict to an IR Policy."""
+    if raw.get("isEnabled") is False:
+        return None
+
     svc_str = raw.get("serviceType", raw.get("service", "")).lower()
     try:
         service_type = ServiceType.from_string(svc_str)
@@ -153,28 +174,35 @@ def parse_ranger_policy(raw: dict) -> Optional[Policy]:
     if service_type == ServiceType.UNKNOWN:
         return None
 
-    resources_raw = raw.get("resources", {})
-    resource = _build_resource(service_type, resources_raw)
+    resource_blocks = [raw.get("resources", {})]
+    resource_blocks.extend(raw.get("additionalResources", []) or [])
+    resources = [
+        resource
+        for resources_raw in resource_blocks
+        for resource in _build_resources(service_type, resources_raw)
+    ]
+    if not resources:
+        return None
 
     permissions: list[PermissionEntry] = []
 
-    # Process allow and deny items
-    for item_key in ("policyItems", "denyPolicyItems"):
-        for item in raw.get(item_key, []) or []:
-            accesses = item.get("accesses", []) or []
-            ranger_actions = [a.get("type", "") for a in accesses if a.get("isAllowed", True)]
-            if not ranger_actions:
-                continue
-            guardian_actions = _map_actions(svc_str, ranger_actions)
-            principals = _collect_principals(item)
+    for item in raw.get("policyItems", []) or []:
+        accesses = item.get("accesses", []) or []
+        ranger_actions = [a.get("type", "") for a in accesses if a.get("isAllowed", True)]
+        if not ranger_actions:
+            continue
+        guardian_actions = _map_actions(svc_str, ranger_actions)
+        principals = _collect_principals(item)
+        grantable = bool(item.get("delegateAdmin", False))
 
+        for resource in resources:
             for principal in principals:
                 for action in guardian_actions:
                     permissions.append(PermissionEntry(
                         action=action,
                         resource=resource,
                         principal=principal,
-                        grantable=False,
+                        grantable=grantable,
                         heritable=True,
                         administrative=True,
                     ))
@@ -186,7 +214,7 @@ def parse_ranger_policy(raw: dict) -> Optional[Policy]:
         source="ranger",
         service_type=service_type,
         service_name=raw.get("service", ""),
-        resources=[resource],
+        resources=resources,
         permissions=permissions,
         description=raw.get("description", raw.get("name", "")),
     )

@@ -47,6 +47,9 @@ except ImportError:
 
 # ── Action normalization ────────────────────────────────────────────────────
 
+_SENTRY_HIVE_EXPANDED = ["CREATE", "SELECT", "INSERT", "UPDATE", "DELETE", "ADMIN"]
+_SENTRY_HDFS_EXPANDED = ["READ", "WRITE", "EXECUTE", "ADMIN"]
+
 # Sentry privilege strings -> Guardian Hive actions
 _SENTRY_TO_GUARDIAN: dict[str, str] = {
     "select": "SELECT",
@@ -58,18 +61,29 @@ _SENTRY_TO_GUARDIAN: dict[str, str] = {
     "create": "CREATE",
     "delete": "DELETE",
     "drop": "DELETE",
-    "all": "ADMIN",
-    "admin": "ADMIN",
-    "*": "ADMIN",
     "index": "ADMIN",
     "lock": "ADMIN",
 }
 
 
-def _map_privilege(priv: str) -> str:
-    """Map a Sentry privilege string to a Guardian action string."""
-    lower = priv.strip().lower()
-    return _SENTRY_TO_GUARDIAN.get(lower, lower.upper())
+def _map_privileges(priv: str, service_type: ServiceType) -> list[str]:
+    """Map a Sentry privilege string to one or more Guardian actions."""
+    actions: list[str] = []
+    for item in (priv or "").split(","):
+        lower = item.strip().lower()
+        if not lower:
+            continue
+        if lower in {"all", "*"}:
+            actions.extend(
+                _SENTRY_HDFS_EXPANDED
+                if service_type == ServiceType.HDFS
+                else _SENTRY_HIVE_EXPANDED
+            )
+        elif lower == "admin":
+            actions.append("ADMIN")
+        else:
+            actions.append(_SENTRY_TO_GUARDIAN.get(lower, lower.upper()))
+    return list(dict.fromkeys(actions))
 
 
 # ── Service type detection ──────────────────────────────────────────────────
@@ -91,18 +105,13 @@ def _build_resource(service_type: ServiceType, row: dict[str, str]) -> ResourceP
     """Build a ResourcePath from a Sentry row."""
     if service_type == ServiceType.HDFS:
         path = row.get("database", "").strip()
-        # Clean file:// or hdfs:// prefix
-        if "://" in path:
-            # Remove up to first / after ://
-            import re
-            path = re.sub(r'^(file|hdfs)://[^/]+', '', path)
         return ResourcePath(service_type=service_type, path=path or "/")
 
     # Hive path
     database = row.get("database", "").strip()
     table = row.get("table", "").strip()
-    column = row.get("column", "").strip()
     partition = row.get("partition", "").strip()
+    column = row.get("column", "").strip()
 
     # If table field is empty, database might encode db.table
     if not table and "." in database and not database.startswith("/"):
@@ -115,6 +124,7 @@ def _build_resource(service_type: ServiceType, row: dict[str, str]) -> ResourceP
         service_type=service_type,
         database=database if database else "*",
         table=table if table else "",
+        partition=partition if partition else "",
         column=column if column else "",
     )
 
@@ -157,7 +167,7 @@ def parse_sentry_csv(filepath: str) -> MigrationPlan:
         # Auto-detect delimiter
         sample = csvfile.read(4096)
         csvfile.seek(0)
-        delimiter = "\\t" if "\\t" in sample else ","
+        delimiter = "\t" if "\t" in sample else ","
         reader = csv.DictReader(csvfile, delimiter=delimiter)
 
         row_count = 0
@@ -170,30 +180,35 @@ def parse_sentry_csv(filepath: str) -> MigrationPlan:
             service_type = _detect_service_type(database)
             resource = _build_resource(service_type, row)
 
-            # Map privilege
             privilege = row.get("privilege", "").strip()
-            action = _map_privilege(privilege)
+            actions = _map_privileges(privilege, service_type)
+            if not actions:
+                continue
 
             principal = _extract_principal(row)
             if not principal:
                 continue
 
-            perm = PermissionEntry(
-                action=action,
-                resource=resource,
-                principal=principal,
-                grantable=False,
-                heritable=True,
-                administrative=True,
-            )
+            grantable = row.get("grant_option", "").strip().upper() == "TRUE"
+            permissions = [
+                PermissionEntry(
+                    action=action,
+                    resource=resource,
+                    principal=principal,
+                    grantable=grantable,
+                    heritable=True,
+                    administrative=True,
+                )
+                for action in actions
+            ]
 
             policy = Policy(
                 source="sentry",
                 service_type=service_type,
                 service_name="sentry",  # No service discriminator in Sentry
                 resources=[resource],
-                permissions=[perm],
-                description=f"Row {row_count}: {principal.name} {action} on {database}",
+                permissions=permissions,
+                description=f"Row {row_count}: {principal.name} {privilege} on {database}",
             )
 
             plan.policies.append(policy)

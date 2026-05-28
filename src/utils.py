@@ -60,31 +60,33 @@ def ensure_dir(filepath: str) -> None:
 
 
 def merge_policies(policies: list["Policy"]) -> list["Policy"]:
-    """Merge duplicate policies by combining principals.
+    """Merge duplicate permission entries by target/action/principal.
 
-    Policies with identical (service_type, resource_path, actions, grant)
-    but different principals get merged into one policy.
+    The IR stores permissions directly on Policy objects, so this helper keeps
+    the first policy shell and removes duplicate PermissionEntry records.
     """
-    from collections import defaultdict
-
-    key_to_policy: dict[tuple, "Policy"] = {}
+    merged: dict[tuple, "Policy"] = {}
     for p in policies:
-        if not p.permissions:
-            continue
-        perm = p.permissions[0]
-        key = (
-            p.service_type,
-            perm.resource.to_guardian_data_source(),
-            frozenset(perm.actions),
-            perm.grant,
-        )
-        if key in key_to_policy:
-            existing = key_to_policy[key]
-            existing_names = {(pr.name, pr.ptype) for pr in existing.principals}
-            for pr in p.principals:
-                if (pr.name, pr.ptype) not in existing_names:
-                    existing.principals.append(pr)
-        else:
-            key_to_policy[key] = p
+        for perm in p.permissions:
+            key = (
+                perm.resource.service_type,
+                tuple(perm.resource.to_guardian_data_source()),
+                perm.action,
+                perm.principal.name,
+                perm.principal.principal_type,
+                perm.grantable,
+                perm.heritable,
+                perm.administrative,
+            )
+            if key in merged:
+                continue
+            merged[key] = type(p)(
+                source=p.source,
+                service_type=p.service_type,
+                service_name=p.service_name,
+                resources=[perm.resource],
+                permissions=[perm],
+                description=p.description,
+            )
 
-    return list(key_to_policy.values())
+    return list(merged.values())

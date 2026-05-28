@@ -60,11 +60,11 @@ except ImportError:
     )
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
+# Helpers
 
 def _escape_sh(s: str) -> str:
     """Escape a string for single-quote shell context."""
-    return s.replace("'", "\\'")
+    return s.replace("'", "'\"'\"'")
 
 def _json_sh(obj) -> str:
     """JSON-encode an object and escape for shell."""
@@ -85,7 +85,7 @@ def _curl_cmd(method: str, url: str, body: dict) -> str:
     )
 
 
-# ── Section generators ──────────────────────────────────────────────────────
+# Section generators
 
 def _gen_users(plan: MigrationPlan, base_url: str) -> list[str]:
     """Generate create-user commands."""
@@ -178,17 +178,22 @@ def _gen_permissions(plan: MigrationPlan, base_url: str) -> list[str]:
     url = _token_url(base_url, ENDPOINT_PERMS_GRANT)
 
     for policy in plan.policies:
-        component = GUARDIAN_COMPONENT.get(policy.service_type.value, "quark1")
         for perm in policy.permissions:
-            # Determine role name
-            role_name = perm.principal.name if perm.principal.principal_type == PrincipalType.ROLE else perm.principal.name
+            component = GUARDIAN_COMPONENT.get(perm.resource.service_type.value, "quark1")
+            principal_name = perm.principal.name
             ds = perm.resource.to_guardian_data_source()
-            dedup_key = (role_name, perm.action, json.dumps(ds, sort_keys=True))
+            principal_type = perm.principal.principal_type.value
+            dedup_key = (
+                principal_name,
+                principal_type,
+                perm.action,
+                json.dumps(ds, sort_keys=True),
+            )
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
             body = {
-                "name": role_name,
+                "name": principal_name,
                 "permissionVo": {
                     "action": perm.action.upper(),
                     "administrative": perm.administrative,
@@ -197,13 +202,13 @@ def _gen_permissions(plan: MigrationPlan, base_url: str) -> list[str]:
                     "grantable": perm.grantable,
                     "heritable": perm.heritable,
                 },
-                "principalType": "ROLE",
+                "principalType": principal_type,
             }
             lines.append(_curl_cmd("PUT", url, body))
     return lines
 
 
-# ── Main entry ──────────────────────────────────────────────────────────────
+# Main entry
 
 def generate_script(
     plan: MigrationPlan,
@@ -217,29 +222,29 @@ def generate_script(
     url = (base_url or os.environ.get("GUARDIAN_URL", DEFAULT_GUARDIAN_URL)).rstrip("/")
 
     sections: list[tuple[str, list[str]]] = [
-        ("# ── Create Users ──", _gen_users(plan, url)),
-        ("# ── Create Groups ──", _gen_groups(plan, url)),
-        ("# ── Create Roles ──", _gen_roles(plan, url)),
-        ("# ── Assign Users to Groups ──", _gen_group_assignments(plan, url)),
-        ("# ── Assign Groups to Roles ──", _gen_role_assignments(plan, url)),
-        ("# ── Grant Permissions to Roles ──", _gen_permissions(plan, url)),
+        ("# Create Users", _gen_users(plan, url)),
+        ("# Create Groups", _gen_groups(plan, url)),
+        ("# Create Roles", _gen_roles(plan, url)),
+        ("# Assign Users to Groups", _gen_group_assignments(plan, url)),
+        ("# Assign Groups to Roles", _gen_role_assignments(plan, url)),
+        ("# Grant Permissions", _gen_permissions(plan, url)),
     ]
 
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write("#!/usr/bin/env bash\\n")
-        f.write(f"# Guardian Permission Migration Script\\n")
-        f.write(f"# Generated from IR with {plan.source_metadata.get('source', 'unknown')} source\\n")
-        f.write(f"# Base URL: {url}\\n")
-        f.write("set -euo pipefail\\n\\n")
+        f.write("#!/usr/bin/env bash\n")
+        f.write("# Guardian Permission Migration Script\n")
+        f.write(f"# Generated from IR with {plan.source_metadata.get('source', 'unknown')} source\n")
+        f.write(f"# Base URL: {url}\n")
+        f.write("set -euo pipefail\n\n")
 
         for header, lines in sections:
             if not lines:
                 continue
-            f.write(header + "\\n")
+            f.write(header + "\n")
             for line in lines:
                 f.write(line)
-            f.write("\\n")
+            f.write("\n")
 
-        f.write("echo 'Migration script completed.'\\n")
+        f.write("echo 'Migration script completed.'\n")
 
     return os.path.abspath(output_path)

@@ -89,6 +89,7 @@ def _plan_to_dict(plan) -> dict:
                     "service_type": pm.resource.service_type.value if pm.resource.service_type else None,
                     "database": pm.resource.database,
                     "table": pm.resource.table,
+                    "partition": pm.resource.partition,
                     "column": pm.resource.column,
                     "path": pm.resource.path,
                 },
@@ -96,8 +97,17 @@ def _plan_to_dict(plan) -> dict:
                     "name": pm.principal.name,
                     "type": pm.principal.principal_type.value,
                 },
+                "grantable": pm.grantable,
+                "heritable": pm.heritable,
+                "administrative": pm.administrative,
             })
-        policies.append(perms)
+        policies.append({
+            "source": p.source,
+            "service_type": p.service_type.value if p.service_type else None,
+            "service_name": p.service_name,
+            "description": p.description,
+            "permissions": perms,
+        })
 
     return {
         "source_metadata": plan.source_metadata,
@@ -112,15 +122,26 @@ def _plan_to_dict(plan) -> dict:
 
 def _plan_from_dict(d: dict):
     """Deserialize a dict back to MigrationPlan."""
-    from models import (
-        MigrationPlan,
-        Policy,
-        PermissionEntry,
-        Principal,
-        PrincipalType,
-        ResourcePath,
-        ServiceType,
-    )
+    try:
+        from .models import (
+            MigrationPlan,
+            Policy,
+            PermissionEntry,
+            Principal,
+            PrincipalType,
+            ResourcePath,
+            ServiceType,
+        )
+    except ImportError:
+        from models import (  # noqa
+            MigrationPlan,
+            Policy,
+            PermissionEntry,
+            Principal,
+            PrincipalType,
+            ResourcePath,
+            ServiceType,
+        )
     plan = MigrationPlan()
     plan.source_metadata = d.get("source_metadata", {})
     plan.users = set(d.get("users", []))
@@ -129,7 +150,17 @@ def _plan_from_dict(d: dict):
     plan.role_group_assignments = {k: set(v) for k, v in d.get("role_group_assignments", {}).items()}
     plan.group_user_assignments = {k: set(v) for k, v in d.get("group_user_assignments", {}).items()}
 
-    for perm_list in d.get("policies", []):
+    for policy_data in d.get("policies", []):
+        if isinstance(policy_data, list):
+            perm_list = policy_data
+            policy_source = "ir"
+            policy_service_name = ""
+            policy_description = ""
+        else:
+            perm_list = policy_data.get("permissions", [])
+            policy_source = policy_data.get("source", "ir")
+            policy_service_name = policy_data.get("service_name", "")
+            policy_description = policy_data.get("description", "")
         permissions = []
         for pm in perm_list:
             r = pm["resource"]
@@ -138,6 +169,7 @@ def _plan_from_dict(d: dict):
                 service_type=st,
                 database=r.get("database"),
                 table=r.get("table"),
+                partition=r.get("partition"),
                 column=r.get("column"),
                 path=r.get("path"),
             )
@@ -150,14 +182,18 @@ def _plan_from_dict(d: dict):
                 action=pm["action"],
                 resource=resource,
                 principal=principal,
+                grantable=pm.get("grantable", False),
+                heritable=pm.get("heritable", True),
+                administrative=pm.get("administrative", True),
             ))
         if permissions:
             plan.policies.append(Policy(
-                source="ir",
+                source=policy_source,
                 service_type=permissions[0].resource.service_type,
-                service_name="",
+                service_name=policy_service_name,
                 resources=[pm2.resource for pm2 in permissions],
                 permissions=permissions,
+                description=policy_description,
             ))
     return plan
 
