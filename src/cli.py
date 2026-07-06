@@ -47,11 +47,13 @@ def cmd_guardian(args):
     plan = _load_plan(args.input)
     from ir_to_guardian import generate_script
     output = args.output or "permission_migration.sh"
+    component_overrides = _component_overrides(args)
     path = generate_script(
         plan,
         output,
         base_url=args.base_url or None,
         access_token=args.access_token or None,
+        component_overrides=component_overrides,
     )
     print(f"Guardian script generated: {path}")
 
@@ -76,11 +78,13 @@ def cmd_migrate(args):
 
     from ir_to_guardian import generate_script
     output = args.output or "permission_migration.sh"
+    component_overrides = _component_overrides(args)
     path = generate_script(
         plan,
         output,
         base_url=args.base_url or None,
         access_token=args.access_token or None,
+        component_overrides=component_overrides,
     )
     print(f"Guardian script generated: {path}")
 
@@ -227,6 +231,15 @@ def _print_summary(plan):
     print(f"Policies: {len(plan.policies)}")
 
 
+def _component_overrides(args) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    if getattr(args, "hive_component", None):
+        overrides["hive"] = args.hive_component
+    if getattr(args, "hdfs_component", None):
+        overrides["hdfs"] = args.hdfs_component
+    return overrides
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -253,6 +266,8 @@ def main():
     p_guardian.add_argument("--output", "-o")
     p_guardian.add_argument("--base-url", help="Guardian API base URL")
     p_guardian.add_argument("--access-token", help="Guardian access token")
+    p_guardian.add_argument("--hive-component", help="Guardian Hive component name")
+    p_guardian.add_argument("--hdfs-component", help="Guardian HDFS component name")
 
     # migrate (end-to-end)
     p_migrate = sub.add_parser("migrate", help="Full migration: source -> IR -> Guardian script")
@@ -261,6 +276,8 @@ def main():
     p_migrate.add_argument("--output", "-o")
     p_migrate.add_argument("--base-url")
     p_migrate.add_argument("--access-token")
+    p_migrate.add_argument("--hive-component")
+    p_migrate.add_argument("--hdfs-component")
     p_migrate.add_argument("--save-ir", help="Save intermediate IR to file")
 
     args = parser.parse_args()

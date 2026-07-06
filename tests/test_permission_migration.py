@@ -76,6 +76,7 @@ class PermissionMigrationTests(unittest.TestCase):
                 str(out),
                 base_url="https://guardian.example",
                 access_token="unit-token",
+                component_overrides={"hdfs": "unit-hdfs"},
             )
             text = out.read_text(encoding="utf-8")
 
@@ -84,6 +85,7 @@ class PermissionMigrationTests(unittest.TestCase):
         self.assertIn("guardian_access_token=unit-token", text)
         self.assertIn('"principalType": "GROUP"', text)
         self.assertIn('"dataSource": ["PATH", "/", "user", "team"]', text)
+        self.assertIn('"component": "unit-hdfs"', text)
 
     def test_ranger_multiple_resource_values_are_expanded(self):
         data = {

@@ -156,7 +156,17 @@ def _gen_role_assignments(plan: MigrationPlan, base_url: str, access_token: str)
             lines.append(_curl_cmd("PUT", url, body))
     return lines
 
-def _gen_permissions(plan: MigrationPlan, base_url: str, access_token: str) -> list[str]:
+def _component_for_service(service_type: str, component_overrides: Optional[dict[str, str]] = None) -> str:
+    overrides = component_overrides or {}
+    return overrides.get(service_type) or GUARDIAN_COMPONENT.get(service_type, "quark1")
+
+
+def _gen_permissions(
+    plan: MigrationPlan,
+    base_url: str,
+    access_token: str,
+    component_overrides: Optional[dict[str, str]] = None,
+) -> list[str]:
     """Generate grant-permission-to-role commands.
 
     PUT /api/v1/perms/grant
@@ -179,7 +189,10 @@ def _gen_permissions(plan: MigrationPlan, base_url: str, access_token: str) -> l
 
     for policy in plan.policies:
         for perm in policy.permissions:
-            component = GUARDIAN_COMPONENT.get(perm.resource.service_type.value, "quark1")
+            component = _component_for_service(
+                perm.resource.service_type.value,
+                component_overrides,
+            )
             principal_name = perm.principal.name
             ds = perm.resource.to_guardian_data_source()
             principal_type = perm.principal.principal_type.value
@@ -215,6 +228,7 @@ def generate_script(
     output_path: str,
     base_url: Optional[str] = None,
     access_token: Optional[str] = None,
+    component_overrides: Optional[dict[str, str]] = None,
 ) -> str:
     """Generate a Guardian API shell script and write it to output_path.
 
@@ -229,7 +243,7 @@ def generate_script(
         ("# Create Roles", _gen_roles(plan, url, token)),
         ("# Assign Users to Groups", _gen_group_assignments(plan, url, token)),
         ("# Assign Groups to Roles", _gen_role_assignments(plan, url, token)),
-        ("# Grant Permissions", _gen_permissions(plan, url, token)),
+        ("# Grant Permissions", _gen_permissions(plan, url, token, component_overrides)),
     ]
 
     with open(output_path, "w", encoding="utf-8") as f:
