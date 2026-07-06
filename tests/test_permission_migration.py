@@ -71,11 +71,17 @@ class PermissionMigrationTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "grant.sh"
-            generate_script(plan, str(out), base_url="https://guardian.example")
+            generate_script(
+                plan,
+                str(out),
+                base_url="https://guardian.example",
+                access_token="unit-token",
+            )
             text = out.read_text(encoding="utf-8")
 
         self.assertTrue(text.startswith("#!/usr/bin/env bash\n"))
         self.assertNotIn("\\n#", text)
+        self.assertIn("guardian_access_token=unit-token", text)
         self.assertIn('"principalType": "GROUP"', text)
         self.assertIn('"dataSource": ["PATH", "/", "user", "team"]', text)
 

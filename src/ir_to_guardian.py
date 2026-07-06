@@ -70,10 +70,10 @@ def _json_sh(obj) -> str:
     """JSON-encode an object and escape for shell."""
     return _escape_sh(json.dumps(obj, ensure_ascii=False))
 
-def _token_url(base: str, endpoint: str) -> str:
+def _token_url(base: str, endpoint: str, access_token: str) -> str:
     """Build a full URL with the access token query parameter."""
     sep = "&" if "?" in endpoint else "?"
-    return f"{base}{endpoint}{sep}guardian_access_token={DEFAULT_GUARDIAN_TOKEN}"
+    return f"{base}{endpoint}{sep}guardian_access_token={access_token}"
 
 def _curl_cmd(method: str, url: str, body: dict) -> str:
     """Format a curl command matching sentry_to_guardian.py style."""
@@ -87,7 +87,7 @@ def _curl_cmd(method: str, url: str, body: dict) -> str:
 
 # Section generators
 
-def _gen_users(plan: MigrationPlan, base_url: str) -> list[str]:
+def _gen_users(plan: MigrationPlan, base_url: str, access_token: str) -> list[str]:
     """Generate create-user commands."""
     lines: list[str] = []
     for user_name in sorted(plan.users):
@@ -96,29 +96,29 @@ def _gen_users(plan: MigrationPlan, base_url: str) -> list[str]:
             "userName": user_name,
             "userPassword": DEFAULT_USER_PASSWORD,
         }
-        url = _token_url(base_url, ENDPOINT_USERS)
+        url = _token_url(base_url, ENDPOINT_USERS, access_token)
         lines.append(_curl_cmd("POST", url, body))
     return lines
 
-def _gen_groups(plan: MigrationPlan, base_url: str) -> list[str]:
+def _gen_groups(plan: MigrationPlan, base_url: str, access_token: str) -> list[str]:
     """Generate create-group commands."""
     lines: list[str] = []
     for group_name in sorted(plan.groups):
         body = {"groupName": group_name}
-        url = _token_url(base_url, ENDPOINT_GROUPS)
+        url = _token_url(base_url, ENDPOINT_GROUPS, access_token)
         lines.append(_curl_cmd("POST", url, body))
     return lines
 
-def _gen_roles(plan: MigrationPlan, base_url: str) -> list[str]:
+def _gen_roles(plan: MigrationPlan, base_url: str, access_token: str) -> list[str]:
     """Generate create-role commands."""
     lines: list[str] = []
     for role_name in sorted(plan.roles):
         body = {"roleName": role_name}
-        url = _token_url(base_url, ENDPOINT_ROLES)
+        url = _token_url(base_url, ENDPOINT_ROLES, access_token)
         lines.append(_curl_cmd("POST", url, body))
     return lines
 
-def _gen_group_assignments(plan: MigrationPlan, base_url: str) -> list[str]:
+def _gen_group_assignments(plan: MigrationPlan, base_url: str, access_token: str) -> list[str]:
     """Generate assign-user-to-group commands.
 
     PUT /api/v1/groups/{group_name}/assign
@@ -127,7 +127,7 @@ def _gen_group_assignments(plan: MigrationPlan, base_url: str) -> list[str]:
     lines: list[str] = []
     for group_name in sorted(plan.group_user_assignments):
         endpoint = ENDPOINT_GROUP_ASSIGN.replace("{name}", group_name)
-        url = _token_url(base_url, endpoint)
+        url = _token_url(base_url, endpoint, access_token)
         for user_name in sorted(plan.group_user_assignments[group_name]):
             body = {
                 "groupName": group_name,
@@ -137,7 +137,7 @@ def _gen_group_assignments(plan: MigrationPlan, base_url: str) -> list[str]:
             lines.append(_curl_cmd("PUT", url, body))
     return lines
 
-def _gen_role_assignments(plan: MigrationPlan, base_url: str) -> list[str]:
+def _gen_role_assignments(plan: MigrationPlan, base_url: str, access_token: str) -> list[str]:
     """Generate assign-group-to-role commands.
 
     PUT /api/v1/roles/{role_name}/assign
@@ -146,7 +146,7 @@ def _gen_role_assignments(plan: MigrationPlan, base_url: str) -> list[str]:
     lines: list[str] = []
     for role_name in sorted(plan.role_group_assignments):
         endpoint = ENDPOINT_ROLE_ASSIGN.replace("{name}", role_name)
-        url = _token_url(base_url, endpoint)
+        url = _token_url(base_url, endpoint, access_token)
         for group_name in sorted(plan.role_group_assignments[role_name]):
             body = {
                 "name": group_name,
@@ -156,7 +156,7 @@ def _gen_role_assignments(plan: MigrationPlan, base_url: str) -> list[str]:
             lines.append(_curl_cmd("PUT", url, body))
     return lines
 
-def _gen_permissions(plan: MigrationPlan, base_url: str) -> list[str]:
+def _gen_permissions(plan: MigrationPlan, base_url: str, access_token: str) -> list[str]:
     """Generate grant-permission-to-role commands.
 
     PUT /api/v1/perms/grant
@@ -175,7 +175,7 @@ def _gen_permissions(plan: MigrationPlan, base_url: str) -> list[str]:
     """
     lines: list[str] = []
     seen: set[tuple[str, str, str]] = set()
-    url = _token_url(base_url, ENDPOINT_PERMS_GRANT)
+    url = _token_url(base_url, ENDPOINT_PERMS_GRANT, access_token)
 
     for policy in plan.policies:
         for perm in policy.permissions:
@@ -214,20 +214,22 @@ def generate_script(
     plan: MigrationPlan,
     output_path: str,
     base_url: Optional[str] = None,
+    access_token: Optional[str] = None,
 ) -> str:
     """Generate a Guardian API shell script and write it to output_path.
 
     Returns the absolute path to the generated script.
     """
     url = (base_url or os.environ.get("GUARDIAN_URL", DEFAULT_GUARDIAN_URL)).rstrip("/")
+    token = access_token or os.environ.get("GUARDIAN_ACCESS_TOKEN", DEFAULT_GUARDIAN_TOKEN)
 
     sections: list[tuple[str, list[str]]] = [
-        ("# Create Users", _gen_users(plan, url)),
-        ("# Create Groups", _gen_groups(plan, url)),
-        ("# Create Roles", _gen_roles(plan, url)),
-        ("# Assign Users to Groups", _gen_group_assignments(plan, url)),
-        ("# Assign Groups to Roles", _gen_role_assignments(plan, url)),
-        ("# Grant Permissions", _gen_permissions(plan, url)),
+        ("# Create Users", _gen_users(plan, url, token)),
+        ("# Create Groups", _gen_groups(plan, url, token)),
+        ("# Create Roles", _gen_roles(plan, url, token)),
+        ("# Assign Users to Groups", _gen_group_assignments(plan, url, token)),
+        ("# Assign Groups to Roles", _gen_role_assignments(plan, url, token)),
+        ("# Grant Permissions", _gen_permissions(plan, url, token)),
     ]
 
     with open(output_path, "w", encoding="utf-8") as f:

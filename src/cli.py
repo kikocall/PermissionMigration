@@ -47,7 +47,12 @@ def cmd_guardian(args):
     plan = _load_plan(args.input)
     from ir_to_guardian import generate_script
     output = args.output or "permission_migration.sh"
-    path = generate_script(plan, output, base_url=args.base_url or None)
+    path = generate_script(
+        plan,
+        output,
+        base_url=args.base_url or None,
+        access_token=args.access_token or None,
+    )
     print(f"Guardian script generated: {path}")
 
 
@@ -71,7 +76,12 @@ def cmd_migrate(args):
 
     from ir_to_guardian import generate_script
     output = args.output or "permission_migration.sh"
-    path = generate_script(plan, output, base_url=args.base_url or None)
+    path = generate_script(
+        plan,
+        output,
+        base_url=args.base_url or None,
+        access_token=args.access_token or None,
+    )
     print(f"Guardian script generated: {path}")
 
 
@@ -242,6 +252,7 @@ def main():
     p_guardian.add_argument("--input", "-i", required=True)
     p_guardian.add_argument("--output", "-o")
     p_guardian.add_argument("--base-url", help="Guardian API base URL")
+    p_guardian.add_argument("--access-token", help="Guardian access token")
 
     # migrate (end-to-end)
     p_migrate = sub.add_parser("migrate", help="Full migration: source -> IR -> Guardian script")
@@ -249,6 +260,7 @@ def main():
     p_migrate.add_argument("--source-input", required=True)
     p_migrate.add_argument("--output", "-o")
     p_migrate.add_argument("--base-url")
+    p_migrate.add_argument("--access-token")
     p_migrate.add_argument("--save-ir", help="Save intermediate IR to file")
 
     args = parser.parse_args()
