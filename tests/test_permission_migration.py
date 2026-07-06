@@ -50,6 +50,12 @@ class PermissionMigrationTests(unittest.TestCase):
         ds = plan.policies[0].permissions[0].resource.to_guardian_data_source()
         self.assertEqual(ds, ["PATH", "/", "ns1", "user", "team"])
 
+    def test_hdfs_global_like_paths_map_to_root_path(self):
+        for raw_path in ["/", "*", "/*", "GLOBAL", "global"]:
+            with self.subTest(raw_path=raw_path):
+                resource = ResourcePath(service_type=ServiceType.HDFS, path=raw_path)
+                self.assertEqual(resource.to_guardian_data_source(), ["PATH", "/"])
+
     def test_guardian_script_preserves_principal_type_and_hdfs_datasource(self):
         plan = MigrationPlan(
             policies=[
@@ -171,6 +177,35 @@ class PermissionMigrationTests(unittest.TestCase):
         self.assertEqual(perm.principal.name, "bob")
         self.assertEqual(perm.resource.service_type, ServiceType.HDFS)
         self.assertEqual(perm.resource.to_guardian_data_source(), ["PATH", "/", "warehouse", "path"])
+
+    def test_ranger_hdfs_wildcard_path_maps_to_root_path(self):
+        data = {
+            "policies": [
+                {
+                    "serviceType": "hdfs",
+                    "service": "hdfs_service",
+                    "name": "root",
+                    "resources": {
+                        "path": {"values": ["*"], "isExcludes": False, "isRecursive": True},
+                    },
+                    "policyItems": [
+                        {
+                            "accesses": [{"type": "read", "isAllowed": True}],
+                            "users": ["hdfs"],
+                        }
+                    ],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ranger.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            plan = parse_ranger_export(str(path))
+
+        self.assertEqual(
+            plan.policies[0].permissions[0].resource.to_guardian_data_source(),
+            ["PATH", "/"],
+        )
 
     def test_ir_roundtrip_keeps_permission_flags_and_partition(self):
         plan = MigrationPlan(

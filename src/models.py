@@ -58,12 +58,12 @@ class ResourcePath:
         HDFS: path as-is
         """
         if self.service_type == ServiceType.HDFS:
-            raw_path = self.path or "/"
-            if raw_path == "*" or raw_path.upper() == "GLOBAL":
-                return ["GLOBAL"]
+            raw_path = (self.path or "/").strip()
+            if raw_path in {"/", "*", "/*"} or raw_path.upper() == "GLOBAL":
+                return ["PATH", "/"]
             path_parts = raw_path.split("/")
             return ["PATH", "/"] + [
-                part for part in path_parts if part and part != "hdfs:"
+                part for part in path_parts if part and part not in {"hdfs:", "*"}
             ]
         # Hive / table-based
         if not self.database or self.database == "*" or self.database == "GLOBAL":
