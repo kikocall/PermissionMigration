@@ -112,13 +112,73 @@ python -m src.cli sentry --input sentry_export_example.csv --output output\sentr
 python -m src.cli guardian --input output\ranger_ir.json --output output\permission_migration.sh
 ```
 
-### 5. 指定 Guardian 地址
+### 5. 指定 Guardian 地址、token 和组件名
 
 ```powershell
-python -m src.cli guardian --input output\ranger_ir.json --output output\permission_migration.sh --base-url https://guardian.example:8380
+python -m src.cli guardian `
+  --input output\ranger_ir.json `
+  --output output\permission_migration.sh `
+  --base-url https://guardian.example:8380 `
+  --access-token <guardian_access_token> `
+  --hive-component <guardian_hive_component> `
+  --hdfs-component <guardian_hdfs_component>
 ```
 
 如果不传 `--base-url`，脚本会优先读取环境变量 `GUARDIAN_URL`，否则使用 `src/constants.py` 里的默认值。
+
+`--access-token` 也可以通过环境变量 `GUARDIAN_ACCESS_TOKEN` 传入。生产环境建议显式指定 `--access-token`、`--hive-component` 和 `--hdfs-component`，不要依赖默认值。不同 TDH 集群、不同租户的 Guardian component 名称可能不同，例如某个集群中 Hive/HDFS component 可能是 `ylhive1`、`ylhdfs1`，而不是默认的 `quark1`、`tdfs1`。
+
+## 生产环境推荐流程
+
+1. 在生产环境或跳板机上解压发布包。
+2. 准备 Ranger JSON 或 Sentry CSV/TSV 导出文件。
+3. 确认 Guardian Server 地址、`guardian_access_token`、Hive component 名、HDFS component 名。
+4. 先生成 IR 和 Guardian shell 脚本，不要立即执行。
+5. 抽查脚本中的 `component`、`principalType`、`dataSource` 是否符合目标集群。
+6. 使用 `bash -n` 检查 shell 语法。
+7. 再执行生成的 shell 脚本。
+
+Ranger 示例：
+
+```bash
+python -m src.cli migrate \
+  --source ranger \
+  --source-input Ranger_Policies.json \
+  --save-ir ranger_ir.json \
+  --output guardian_import.sh \
+  --base-url https://guardian.example:8380 \
+  --access-token '<guardian_access_token>' \
+  --hive-component ylhive1 \
+  --hdfs-component ylhdfs1
+
+bash -n guardian_import.sh
+bash guardian_import.sh
+```
+
+Sentry 示例：
+
+```bash
+python -m src.cli migrate \
+  --source sentry \
+  --source-input sentry_export.csv \
+  --save-ir sentry_ir.json \
+  --output guardian_import.sh \
+  --base-url https://guardian.example:8380 \
+  --access-token '<guardian_access_token>' \
+  --hive-component ylhive1 \
+  --hdfs-component ylhdfs1
+
+bash -n guardian_import.sh
+bash guardian_import.sh
+```
+
+生产执行前建议重点检查：
+
+- `guardian_import.sh` 中是否只出现目标集群真实存在的 component。
+- HDFS 权限是否使用 `["PATH", "/", ...]`。
+- Hive 权限是否使用 `["TABLE_OR_VIEW", database, table, ...]`。
+- 是否存在 `{OWNER}`、`{USER}` 这类 Ranger 占位符主体。Guardian 用户名规则可能拒绝这类名称。
+- 是否允许脚本创建缺失用户。默认创建用户时会使用 `src/constants.py` 中的 `DEFAULT_USER_PASSWORD`。
 
 ## 当前支持范围
 
@@ -188,6 +248,22 @@ python -m src.cli migrate --source ranger --source-input Ranger_export_example.j
 - 不提交 `output/`、`.vscode/`、`__pycache__/`。
 - 修改转换逻辑前，优先补充 `tests/test_permission_migration.py` 中的回归测试。
 - Guardian API payload 格式不能随意改变；需要新增组件映射时，应先拿到对应 Guardian 样例。
+
+## 发布包内容
+
+生产发布包只需要包含：
+
+- `src/`: 新版转换脚本。
+- `README.md`: 使用说明。
+- `tests/`: 可选，用于生产环境执行前自检。
+
+发布包不应包含：
+
+- `qla/`: 真实集群导出文件。
+- `run_artifacts/`: 真实执行脚本、IR、日志、token。
+- `output/`: 本地过程输出。
+- `.git/`、`.vscode/`、`__pycache__/`。
+- 历史样例大文件，除非明确需要离线参考。
 
 ## 参考资料
 
