@@ -133,20 +133,57 @@ Sentry MySQL dump 使用相同命令，输入改为 `.sql`（也支持 `.sql.gz`
 python -m src.cli migrate --source sentry --source-input sentry_20260904.sql --save-ir output\sentry_ir.json --output output\sentry_guardian.sh
 ```
 
-### 3. 只生成 IR
+### 3. 按用户选择性导入
+
+推荐先完整解析一次 dump，同时导出全部用户名：
+
+```bash
+python -m src.cli sentry \
+  --input sentry_20260904.sql \
+  --output output/sentry_full_ir.json \
+  --export-users output/all_users.txt
+```
+
+`all_users.txt` 每行一个用户名且没有表头。复制或编辑得到 `selected_users.txt`，只保留需要导入的用户；允许空行及以 `#` 开头的注释。然后从完整 IR 生成筛选后的 Guardian 脚本，无需再次解析大型 dump：
+
+```bash
+python -m src.cli guardian \
+  --input output/sentry_full_ir.json \
+  --users-file selected_users.txt \
+  --output output/guardian_selected_users.sh \
+  --base-url 'https://guardian.example:8380' \
+  --access-token '<guardian_access_token>' \
+  --hive-component ylhive1 \
+  --hdfs-component ylhdfs1
+```
+
+也可以一步完成，或直接在命令行指定多个用户：
+
+```bash
+python -m src.cli migrate \
+  --source sentry \
+  --source-input sentry_20260904.sql \
+  --users alice,bob \
+  --save-ir output/sentry_selected_ir.json \
+  --output output/guardian_selected_users.sh
+```
+
+筛选后的 IR 和 Guardian 脚本只包含：所选用户、用户直授权、直接授予这些用户的角色及角色权限；如果源数据明确包含用户—组关系，也会包含相关组及组角色权限。白名单中存在无法匹配的用户名时命令会报错退出，避免静默漏迁。
+
+### 4. 只生成 IR
 
 ```powershell
 python -m src.cli ranger --input Ranger_export_example.json --output output\ranger_ir.json
 python -m src.cli sentry --input sentry_export_example.csv --output output\sentry_ir.json
 ```
 
-### 4. 已有 IR 生成 Guardian 脚本
+### 5. 已有 IR 生成 Guardian 脚本
 
 ```powershell
 python -m src.cli guardian --input output\ranger_ir.json --output output\permission_migration.sh
 ```
 
-### 5. 指定 Guardian 地址、token 和组件名
+### 6. 指定 Guardian 地址、token 和组件名
 
 ```powershell
 python -m src.cli guardian `
@@ -251,6 +288,8 @@ bash guardian_import.sh
 - 从 `sentry_db_privilege` 和关联表恢复角色权限与用户直授权。
 - 从 `sentry_role_group_map`、`sentry_role_user_map` 恢复角色成员关系。
 - MySQL 反斜杠转义、双单引号、SQL `NULL` 和 Sentry `__NULL__` 占位值。
+- 通过 `--users` 或 `--users-file` 按用户筛选直授权和可确定的继承权限。
+- 通过 `--export-users` 导出全部已解析用户名，供人工制作白名单。
 
 暂不支持：
 

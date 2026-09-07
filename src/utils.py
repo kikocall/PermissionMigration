@@ -1,5 +1,6 @@
 """Shared utility functions for permission migration tools."""
 
+import copy
 import hashlib
 import json
 import os
@@ -7,9 +8,107 @@ from typing import Optional
 
 # Try to import from sibling modules
 try:
-    from .models import ServiceType
+    from .models import MigrationPlan, Policy, PrincipalType, ServiceType
 except ImportError:
-    from models import ServiceType  # noqa: F811
+    from models import MigrationPlan, Policy, PrincipalType, ServiceType  # noqa: F811
+
+
+def filter_plan_by_users(
+    plan: MigrationPlan,
+    selected_users: set[str],
+    *,
+    strict: bool = True,
+) -> MigrationPlan:
+    """按用户白名单裁剪迁移计划及其可确定的继承权限。
+
+    保留用户直授权、直接授予用户的角色，以及已知组成员关系所带来的组和角色。
+    SQL dump 通常没有 LDAP/操作系统组成员关系，因此不会猜测用户所在组。
+    """
+    requested = {name.strip() for name in selected_users if name.strip()}
+    if not requested:
+        raise ValueError("用户白名单为空")
+
+    missing = requested - plan.users
+    if missing and strict:
+        raise ValueError("以下用户不在解析结果中: " + ", ".join(sorted(missing)))
+    included_users = requested & plan.users
+
+    included_groups = {
+        group_name
+        for group_name, members in plan.group_user_assignments.items()
+        if members & included_users
+    }
+    included_roles = {
+        role_name
+        for role_name, members in plan.role_user_assignments.items()
+        if members & included_users
+    }
+    included_roles.update(
+        role_name
+        for role_name, groups in plan.role_group_assignments.items()
+        if groups & included_groups
+    )
+
+    filtered = MigrationPlan(
+        users=set(included_users),
+        groups=set(included_groups),
+        roles=set(included_roles),
+        role_user_assignments={
+            role_name: set(members & included_users)
+            for role_name, members in plan.role_user_assignments.items()
+            if role_name in included_roles and members & included_users
+        },
+        group_user_assignments={
+            group_name: set(members & included_users)
+            for group_name, members in plan.group_user_assignments.items()
+            if group_name in included_groups and members & included_users
+        },
+        role_group_assignments={
+            role_name: set(groups & included_groups)
+            for role_name, groups in plan.role_group_assignments.items()
+            if role_name in included_roles and groups & included_groups
+        },
+        source_metadata=copy.deepcopy(plan.source_metadata),
+    )
+
+    for policy in plan.policies:
+        permissions = []
+        for permission in policy.permissions:
+            principal = permission.principal
+            keep = (
+                principal.principal_type == PrincipalType.USER
+                and principal.name in included_users
+            ) or (
+                principal.principal_type == PrincipalType.GROUP
+                and principal.name in included_groups
+            ) or (
+                principal.principal_type == PrincipalType.ROLE
+                and principal.name in included_roles
+            )
+            if keep:
+                permissions.append(permission)
+        if permissions:
+            filtered.policies.append(Policy(
+                source=policy.source,
+                service_type=policy.service_type,
+                service_name=policy.service_name,
+                resources=[permission.resource for permission in permissions],
+                permissions=permissions,
+                description=policy.description,
+            ))
+
+    original_permission_count = sum(len(policy.permissions) for policy in plan.policies)
+    filtered_permission_count = sum(len(policy.permissions) for policy in filtered.policies)
+    filtered.source_metadata["user_filter"] = {
+        "selected_users": sorted(included_users),
+        "missing_users": sorted(missing),
+        "original_user_count": len(plan.users),
+        "original_permission_count": original_permission_count,
+        "filtered_permission_count": filtered_permission_count,
+        "included_group_count": len(included_groups),
+        "included_role_count": len(included_roles),
+    }
+    return filtered
 
 
 def service_type_from_ranger_name(name: str) -> ServiceType:

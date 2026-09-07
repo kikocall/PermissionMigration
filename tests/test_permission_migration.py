@@ -2,8 +2,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
-from src.cli import _load_plan, _write_plan
+from src.cli import _load_plan, _write_plan, cmd_guardian
 from src.ir_to_guardian import generate_script
 from src.models import (
     MigrationPlan,
@@ -17,10 +18,140 @@ from src.models import (
 from src.ranger_to_ir import parse_ranger_export
 from src.sentry_to_ir import parse_sentry_csv
 from src.sentry_sql_to_ir import parse_sentry_sql_dump
-from src.utils import merge_policies
+from src.utils import filter_plan_by_users, merge_policies
 
 
 class PermissionMigrationTests(unittest.TestCase):
+    def test_filter_plan_by_users_keeps_direct_and_inherited_permissions(self):
+        def policy(name, principal_type, action="SELECT"):
+            resource = ResourcePath(
+                service_type=ServiceType.HIVE,
+                database="analytics",
+                table=name,
+            )
+            principal = Principal(name, principal_type)
+            return Policy(
+                source="unit",
+                service_type=ServiceType.HIVE,
+                service_name="hive",
+                resources=[resource],
+                permissions=[PermissionEntry(action, resource, principal)],
+            )
+
+        plan = MigrationPlan(
+            policies=[
+                policy("alice", PrincipalType.USER),
+                policy("bob", PrincipalType.USER),
+                policy("alice_direct_role", PrincipalType.ROLE),
+                policy("bob_role", PrincipalType.ROLE),
+                policy("alice_group_role", PrincipalType.ROLE),
+                policy("alice_group", PrincipalType.GROUP),
+            ],
+            users={"alice", "bob"},
+            groups={"alice_group", "bob_group"},
+            roles={"alice_direct_role", "bob_role", "alice_group_role"},
+            role_user_assignments={
+                "alice_direct_role": {"alice"},
+                "bob_role": {"bob"},
+            },
+            group_user_assignments={
+                "alice_group": {"alice"},
+                "bob_group": {"bob"},
+            },
+            role_group_assignments={
+                "alice_group_role": {"alice_group"},
+                "bob_role": {"bob_group"},
+            },
+            source_metadata={"source": "unit"},
+        )
+
+        filtered = filter_plan_by_users(plan, {"alice"})
+
+        self.assertEqual(filtered.users, {"alice"})
+        self.assertEqual(filtered.groups, {"alice_group"})
+        self.assertEqual(filtered.roles, {"alice_direct_role", "alice_group_role"})
+        self.assertEqual(
+            filtered.role_user_assignments,
+            {"alice_direct_role": {"alice"}},
+        )
+        self.assertEqual(
+            filtered.group_user_assignments,
+            {"alice_group": {"alice"}},
+        )
+        principals = {
+            pm.principal.name
+            for item in filtered.policies
+            for pm in item.permissions
+        }
+        self.assertEqual(
+            principals,
+            {"alice", "alice_direct_role", "alice_group_role", "alice_group"},
+        )
+        self.assertEqual(filtered.source_metadata["user_filter"]["original_user_count"], 2)
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "selected.sh"
+            generate_script(
+                filtered,
+                str(output),
+                base_url="https://guardian.example",
+                access_token="unit-token",
+            )
+            script = output.read_text(encoding="utf-8")
+        self.assertIn('"userName": "alice"', script)
+        self.assertNotIn('"userName": "bob"', script)
+        self.assertNotIn('"roleName": "bob_role"', script)
+
+    def test_filter_plan_by_users_rejects_unknown_user(self):
+        plan = MigrationPlan(users={"alice"})
+        with self.assertRaisesRegex(ValueError, "not-found"):
+            filter_plan_by_users(plan, {"alice", "not-found"})
+
+    def test_guardian_cli_filters_a_saved_full_ir(self):
+        resource = ResourcePath(service_type=ServiceType.HIVE, database="db", table="orders")
+        plan = MigrationPlan(
+            policies=[
+                Policy(
+                    source="unit",
+                    service_type=ServiceType.HIVE,
+                    service_name="hive",
+                    resources=[resource],
+                    permissions=[
+                        PermissionEntry(
+                            "SELECT",
+                            resource,
+                            Principal("alice_role", PrincipalType.ROLE),
+                        )
+                    ],
+                )
+            ],
+            users={"alice", "bob"},
+            roles={"alice_role"},
+            role_user_assignments={"alice_role": {"alice"}},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            full_ir = Path(td) / "full.json"
+            selected_users = Path(td) / "selected.txt"
+            output = Path(td) / "selected.sh"
+            _write_plan(plan, str(full_ir))
+            selected_users.write_text("alice\n", encoding="utf-8")
+            cmd_guardian(SimpleNamespace(
+                input=str(full_ir),
+                output=str(output),
+                base_url="https://guardian.example",
+                access_token="unit-token",
+                hive_component="unit-hive",
+                hdfs_component=None,
+                users=None,
+                users_file=str(selected_users),
+                export_users=None,
+            ))
+            script = output.read_text(encoding="utf-8")
+
+        self.assertIn('"userName": "alice"', script)
+        self.assertIn('"action": "SELECT"', script)
+        self.assertIn('"roleName": "alice_role"', script)
+        self.assertNotIn("bob", script)
+
     def test_sentry_mysql_dump_joins_roles_groups_users_and_privileges(self):
         dump = r"""
 CREATE TABLE `sentry_db_privilege` (

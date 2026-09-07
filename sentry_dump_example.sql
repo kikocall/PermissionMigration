@@ -21,6 +21,11 @@ CREATE TABLE `sentry_group` (
   `GROUP_NAME` varchar(128) NOT NULL,
   `CREATE_TIME` bigint(20) NOT NULL
 );
+CREATE TABLE `sentry_user` (
+  `USER_ID` bigint(20) NOT NULL,
+  `USER_NAME` varchar(128) NOT NULL,
+  `CREATE_TIME` bigint(20) NOT NULL
+);
 CREATE TABLE `sentry_role_db_privilege_map` (
   `ROLE_ID` bigint(20) NOT NULL,
   `DB_PRIVILEGE_ID` bigint(20) NOT NULL,
@@ -31,6 +36,16 @@ CREATE TABLE `sentry_role_group_map` (
   `GROUP_ID` bigint(20) NOT NULL,
   `GRANTOR_PRINCIPAL` varchar(128)
 );
+CREATE TABLE `sentry_role_user_map` (
+  `ROLE_ID` bigint(20) NOT NULL,
+  `USER_ID` bigint(20) NOT NULL,
+  `GRANTOR_PRINCIPAL` varchar(128)
+);
+CREATE TABLE `sentry_user_db_privilege_map` (
+  `USER_ID` bigint(20) NOT NULL,
+  `DB_PRIVILEGE_ID` bigint(20) NOT NULL,
+  `GRANTOR_PRINCIPAL` varchar(128)
+);
 CREATE TABLE `sentry_version` (
   `VER_ID` bigint(20) NOT NULL,
   `SCHEMA_VERSION` varchar(127) NOT NULL,
@@ -38,9 +53,15 @@ CREATE TABLE `sentry_version` (
 );
 INSERT INTO `sentry_role` VALUES (1,'analyst_role',1700000000000);
 INSERT INTO `sentry_group` VALUES (10,'analyst_group',1700000000000);
+INSERT INTO `sentry_user` VALUES
+(20,'alice',1700000000000),
+(21,'bob',1700000000000);
 INSERT INTO `sentry_db_privilege` VALUES
 (100,'TABLE','server1','sales','orders','__NULL__','__NULL__','select',1700000000000,'N'),
-(101,'URI','server1','__NULL__','__NULL__','__NULL__','hdfs://nameservice1/data/sales','all',1700000000000,'N');
+(101,'URI','server1','__NULL__','__NULL__','__NULL__','hdfs://nameservice1/data/sales','all',1700000000000,'N'),
+(102,'TABLE','server1','finance','ledger','__NULL__','__NULL__','select',1700000000000,'N');
 INSERT INTO `sentry_role_db_privilege_map` VALUES (1,100,'admin'),(1,101,'admin');
 INSERT INTO `sentry_role_group_map` VALUES (1,10,'admin');
+INSERT INTO `sentry_role_user_map` VALUES (1,20,'admin');
+INSERT INTO `sentry_user_db_privilege_map` VALUES (21,102,'admin');
 INSERT INTO `sentry_version` VALUES (1,'2.2.0','Sentry release version 2.2.0');

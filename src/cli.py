@@ -30,22 +30,36 @@ def _ensure_src_in_path():
 
 
 def cmd_ranger(args):
-    from ranger_to_ir import parse_ranger_export
+    try:
+        from .ranger_to_ir import parse_ranger_export
+    except ImportError:
+        from ranger_to_ir import parse_ranger_export
     plan = parse_ranger_export(args.input)
     _write_plan(plan, args.output)
     _print_summary(plan)
 
 
 def cmd_sentry(args):
-    from sentry_sql_to_ir import parse_sentry_export
+    try:
+        from .sentry_sql_to_ir import parse_sentry_export
+    except ImportError:
+        from sentry_sql_to_ir import parse_sentry_export
     plan = parse_sentry_export(args.input)
+    _export_users(plan, getattr(args, "export_users", None))
+    plan = _apply_user_filter(plan, args)
     _write_plan(plan, args.output)
     _print_summary(plan)
 
 
 def cmd_guardian(args):
     plan = _load_plan(args.input)
-    from ir_to_guardian import generate_script
+    _export_users(plan, getattr(args, "export_users", None))
+    plan = _apply_user_filter(plan, args)
+    _print_summary(plan)
+    try:
+        from .ir_to_guardian import generate_script
+    except ImportError:
+        from ir_to_guardian import generate_script
     output = args.output or "permission_migration.sh"
     component_overrides = _component_overrides(args)
     path = generate_script(
@@ -61,14 +75,23 @@ def cmd_guardian(args):
 def cmd_migrate(args):
     """Full migration: source -> IR -> Guardian script."""
     if args.source == "ranger":
-        from ranger_to_ir import parse_ranger_export
+        try:
+            from .ranger_to_ir import parse_ranger_export
+        except ImportError:
+            from ranger_to_ir import parse_ranger_export
         plan = parse_ranger_export(args.source_input)
     elif args.source == "sentry":
-        from sentry_sql_to_ir import parse_sentry_export
+        try:
+            from .sentry_sql_to_ir import parse_sentry_export
+        except ImportError:
+            from sentry_sql_to_ir import parse_sentry_export
         plan = parse_sentry_export(args.source_input)
     else:
         print(f"Unknown source type: {args.source}", file=sys.stderr)
         sys.exit(1)
+
+    _export_users(plan, getattr(args, "export_users", None))
+    plan = _apply_user_filter(plan, args)
 
     if args.save_ir:
         _write_plan(plan, args.save_ir)
@@ -76,7 +99,10 @@ def cmd_migrate(args):
 
     _print_summary(plan)
 
-    from ir_to_guardian import generate_script
+    try:
+        from .ir_to_guardian import generate_script
+    except ImportError:
+        from ir_to_guardian import generate_script
     output = args.output or "permission_migration.sh"
     component_overrides = _component_overrides(args)
     path = generate_script(
@@ -90,6 +116,67 @@ def cmd_migrate(args):
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _selected_users(args) -> set[str]:
+    """合并命令行和文件中的用户白名单。"""
+    selected: set[str] = set()
+    for value in getattr(args, "users", None) or []:
+        selected.update(name.strip() for name in value.split(",") if name.strip())
+    users_file = getattr(args, "users_file", None)
+    if users_file:
+        with open(users_file, "r", encoding="utf-8-sig") as stream:
+            for line in stream:
+                clean_line = line.strip()
+                if not clean_line or clean_line.startswith("#"):
+                    continue
+                selected.update(name.strip() for name in clean_line.split(",") if name.strip())
+    return selected
+
+
+def _apply_user_filter(plan, args):
+    selected = _selected_users(args)
+    if not selected:
+        return plan
+    try:
+        from .utils import filter_plan_by_users
+    except ImportError:
+        from utils import filter_plan_by_users
+    try:
+        return filter_plan_by_users(plan, selected)
+    except ValueError as error:
+        raise SystemExit(f"错误: {error}") from error
+
+
+def _export_users(plan, output_path: str | None) -> None:
+    """导出全部已解析用户，供人工删减后作为 --users-file 使用。"""
+    if not output_path:
+        return
+    try:
+        from .utils import ensure_dir
+    except ImportError:
+        from utils import ensure_dir
+    ensure_dir(output_path)
+    with open(output_path, "w", encoding="utf-8") as stream:
+        for user_name in sorted(plan.users):
+            stream.write(user_name + "\n")
+    print(f"All parsed users exported: {os.path.abspath(output_path)}")
+
+
+def _add_user_filter_args(parser) -> None:
+    parser.add_argument(
+        "--users",
+        action="append",
+        metavar="USER[,USER...]",
+        help="仅保留指定用户；可使用逗号分隔或重复传入",
+    )
+    parser.add_argument(
+        "--users-file",
+        help="用户白名单文件，每行一个用户名，也支持逗号分隔和 # 注释",
+    )
+    parser.add_argument(
+        "--export-users",
+        help="过滤前导出全部已解析用户名，供人工制作白名单",
+    )
 
 def _plan_to_dict(plan) -> dict:
     """Serialize a MigrationPlan to a JSON-friendly dict."""
@@ -232,6 +319,10 @@ def _print_summary(plan):
     print(f"Roles:    {len(plan.roles)}")
     print(f"Policies: {len(plan.policies)}")
     metadata = plan.source_metadata
+    user_filter = metadata.get("user_filter") or {}
+    if user_filter:
+        print(f"Selected users: {len(user_filter.get('selected_users', []))}")
+        print(f"Filtered permissions: {user_filter.get('filtered_permission_count', 0)}")
     if metadata.get("source") == "sentry-sql":
         versions = metadata.get("schema_versions") or []
         if versions:
@@ -272,6 +363,7 @@ def main():
     p_sentry = sub.add_parser("sentry", help="Parse Sentry CSV/TSV or MySQL dump to IR")
     p_sentry.add_argument("--input", "-i", required=True)
     p_sentry.add_argument("--output", "-o")
+    _add_user_filter_args(p_sentry)
 
     # guardian
     p_guardian = sub.add_parser("guardian", help="Generate Guardian API script from IR")
@@ -281,6 +373,7 @@ def main():
     p_guardian.add_argument("--access-token", help="Guardian access token")
     p_guardian.add_argument("--hive-component", help="Guardian Hive component name")
     p_guardian.add_argument("--hdfs-component", help="Guardian HDFS component name")
+    _add_user_filter_args(p_guardian)
 
     # migrate (end-to-end)
     p_migrate = sub.add_parser("migrate", help="Full migration: source -> IR -> Guardian script")
@@ -292,6 +385,7 @@ def main():
     p_migrate.add_argument("--hive-component")
     p_migrate.add_argument("--hdfs-component")
     p_migrate.add_argument("--save-ir", help="Save intermediate IR to file")
+    _add_user_filter_args(p_migrate)
 
     args = parser.parse_args()
 
