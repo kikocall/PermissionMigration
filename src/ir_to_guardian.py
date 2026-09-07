@@ -138,7 +138,7 @@ def _gen_group_assignments(plan: MigrationPlan, base_url: str, access_token: str
     return lines
 
 def _gen_role_assignments(plan: MigrationPlan, base_url: str, access_token: str) -> list[str]:
-    """Generate assign-group-to-role commands.
+    """Generate group/user-to-role commands.
 
     PUT /api/v1/roles/{role_name}/assign
     Body: { "name": "group_name", "principalType": "GROUP", "roleName": "role_name" }
@@ -151,6 +151,16 @@ def _gen_role_assignments(plan: MigrationPlan, base_url: str, access_token: str)
             body = {
                 "name": group_name,
                 "principalType": "GROUP",
+                "roleName": role_name,
+            }
+            lines.append(_curl_cmd("PUT", url, body))
+    for role_name in sorted(plan.role_user_assignments):
+        endpoint = ENDPOINT_ROLE_ASSIGN.replace("{name}", role_name)
+        url = _token_url(base_url, endpoint, access_token)
+        for user_name in sorted(plan.role_user_assignments[role_name]):
+            body = {
+                "name": user_name,
+                "principalType": "USER",
                 "roleName": role_name,
             }
             lines.append(_curl_cmd("PUT", url, body))
@@ -242,7 +252,7 @@ def generate_script(
         ("# Create Groups", _gen_groups(plan, url, token)),
         ("# Create Roles", _gen_roles(plan, url, token)),
         ("# Assign Users to Groups", _gen_group_assignments(plan, url, token)),
-        ("# Assign Groups to Roles", _gen_role_assignments(plan, url, token)),
+        ("# Assign Groups and Users to Roles", _gen_role_assignments(plan, url, token)),
         ("# Grant Permissions", _gen_permissions(plan, url, token, component_overrides)),
     ]
 

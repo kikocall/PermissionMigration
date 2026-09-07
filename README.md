@@ -38,6 +38,33 @@ Cloudera 官方迁移工具 `authzmigrator` 通常将 Sentry 权限导出为 JSO
 
 本工具兼容逗号分隔 CSV 和制表符分隔 TSV。Sentry 的 `ALL` 或 `*` 会按旧脚本逻辑展开：Hive 展开为 `CREATE, SELECT, INSERT, UPDATE, DELETE, ADMIN`；HDFS/URI 路径展开为 `READ, WRITE, EXECUTE, ADMIN`。
 
+#### Sentry MySQL dump 格式
+
+当前收到的文件是 MySQL 5.7 `mysqldump` 文本，不是 CSV。典型结构依次包含：
+
+- `/*!40101 ... */` 形式的 MySQL 版本条件语句。
+- 每张表的 `DROP TABLE`、`CREATE TABLE`（DDL）。
+- `LOCK TABLES`、`DISABLE KEYS` 等装载辅助语句。
+- `INSERT INTO table VALUES (...),(...);` 形式的 extended-insert 数据；一个 INSERT 行可能非常大。
+
+工具不会执行 dump 中的任何 SQL，只流式读取授权所需表的 DDL 和 INSERT。无列名 INSERT 的值顺序直接取自同一 dump 的 `CREATE TABLE`，因此不依赖单一 Sentry 版本的硬编码列顺序；非目标表的大型 INSERT 会被流式跳过。若文件是 `--no-create-info` 导出的纯数据 dump，则 INSERT 必须显式包含列清单，否则工具会停止而不是猜测列顺序。
+
+收到的表清单属于 Apache Sentry 2.1/2.2 风格。最终版本以 `sentry_version.SCHEMA_VERSION` 的值为准。各表用途如下：
+
+| 表 | 用途 | 当前处理 |
+|---|---|---|
+| `sentry_db_privilege` | Hive/Impala Server、Database、Table、Column、URI 权限 | 导入 |
+| `sentry_role`、`sentry_group`、`sentry_user` | 角色、组、用户实体 | 导入 |
+| `sentry_role_db_privilege_map` | 角色与 DB/URI 权限关系 | 导入 |
+| `sentry_user_db_privilege_map` | 用户直授权关系 | 导入 |
+| `sentry_role_group_map`、`sentry_role_user_map` | 组/用户与角色关系 | 导入 |
+| `sentry_gm_privilege`、`sentry_role_gm_privilege_map` | Kafka、Solr 等 Generic Model 权限 | 识别并统计，暂不生成授权 |
+| `authz_path`、`authz_paths_mapping`、`authz_paths_snapshot_id` | Hive 对象与 HDFS 路径的同步索引 | 忽略，不是授权关系 |
+| `sentry_perm_change`、`sentry_path_change`、`sentry_hms_notification_id` | 增量变更与 HMS 同步状态 | 忽略 |
+| `sequence_table` | DataNucleus/JDO 主键序列 | 忽略 |
+
+Sentry 元数据库保存“组被授予角色”，但不保存 LDAP/操作系统目录中的“用户属于哪些组”。因此 SQL dump 可以恢复角色—组、角色—用户及用户直授权，不能独立恢复组—用户成员关系；如果 Guardian 还需要组成员，必须另行提供 LDAP/AD/操作系统组导出。
+
 ## Guardian API 约束
 
 Guardian API 的调用格式严格沿用 `sentry_to_guardian.py` 中已有样例：
@@ -74,6 +101,7 @@ Hive 表权限的 `dataSource` 使用 `["TABLE_OR_VIEW", database, table, partit
 
 - `ranger_to_sentry.py`: 旧版 Ranger JSON 转 Sentry CSV 格式脚本。
 - `sentry_to_guardian.py`: 旧版 Sentry CSV 转 Guardian API shell 脚本，是当前 Guardian API payload 格式的参考来源。
+- `sentry_dump_example.sql`: 脱敏的最小 MySQL dump 风格样例。
 
 ### 新脚本
 
@@ -97,6 +125,12 @@ python -m src.cli migrate --source ranger --source-input Ranger_export_example.j
 
 ```powershell
 python -m src.cli migrate --source sentry --source-input sentry_export_example.csv --save-ir output\sentry_ir.json --output output\permission_migration.sh
+```
+
+Sentry MySQL dump 使用相同命令，输入改为 `.sql`（也支持 `.sql.gz`），格式会自动识别：
+
+```powershell
+python -m src.cli migrate --source sentry --source-input sentry_20260904.sql --save-ir output\sentry_ir.json --output output\sentry_guardian.sh
 ```
 
 ### 3. 只生成 IR
@@ -155,12 +189,12 @@ bash -n guardian_import.sh
 bash guardian_import.sh
 ```
 
-Sentry 示例：
+Sentry SQL dump 示例：
 
 ```bash
 python -m src.cli migrate \
   --source sentry \
-  --source-input sentry_export.csv \
+  --source-input sentry_20260904.sql \
   --save-ir sentry_ir.json \
   --output guardian_import.sh \
   --base-url https://guardian.example:8380 \
@@ -202,7 +236,7 @@ bash guardian_import.sh
 - 无法映射到 Guardian 样例 `TABLE_OR_VIEW` 或 `PATH` 格式的组件资源，例如 Kafka topic、Atlas entity、YARN queue 等。
 - `isExcludes` 的排除语义。Guardian 样例中没有等价负向授权格式，不能安全转换为正向授权。
 
-### Sentry CSV/TSV
+### Sentry CSV/TSV 与 MySQL dump
 
 已支持：
 
@@ -213,11 +247,16 @@ bash guardian_import.sh
 - `ALL`、`*` 权限展开。
 - 逗号分隔的多权限字段，例如 `SELECT,INSERT`。
 - `grant_option=TRUE` 映射为 Guardian `grantable=true`。
+- MySQL 5.7 `mysqldump` 的 DDL、无列名/带列名 INSERT、extended-insert。
+- 从 `sentry_db_privilege` 和关联表恢复角色权限与用户直授权。
+- 从 `sentry_role_group_map`、`sentry_role_user_map` 恢复角色成员关系。
+- MySQL 反斜杠转义、双单引号、SQL `NULL` 和 Sentry `__NULL__` 占位值。
 
 暂不支持：
 
 - Cloudera `authzmigrator` 原生 `permissions.json`。后续可以新增 `sentry_json_to_ir.py` 或在 `sentry_to_ir.py` 内自动识别 JSON。
 - Sentry Kafka/Kudu 等非 Hive/URI 权限到 Guardian 的映射，除非补充明确的 Guardian `dataSource` 样例。
+- 从 Sentry SQL dump 恢复 LDAP/AD/操作系统组成员；这些关系不在 Sentry 元数据库中。
 
 ## 验证
 
@@ -271,3 +310,4 @@ python -m src.cli migrate --source ranger --source-input Ranger_export_example.j
 - Cloudera Ranger policy import/export: https://docs.cloudera.com/runtime/7.3.1/security-ranger-authorization/topics/security-ranger-resource-policies-importing-exporting.html
 - Cloudera Sentry permissions export: https://docs.cloudera.com/cdp-private-cloud-upgrade/latest/security-authorization/topics/rm-dc-authzmigrator-tool-step1.html
 - Cloudera Sentry privilege model: https://docs-archive.cloudera.com/documentation/enterprise/6/6.0/topics/cm_sg_sentry_service.html
+- Apache Sentry 2.2 MySQL schema: https://github.com/apache/sentry/blob/master/sentry-provider/sentry-provider-db/src/main/resources/sentry-mysql-2.2.0.sql

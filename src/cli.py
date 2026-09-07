@@ -2,7 +2,7 @@
 
 Unified CLI supporting:
   ranger  - Parse Ranger JSON export to IR
-  sentry  - Parse Sentry CSV export to IR
+  sentry  - Parse Sentry CSV/TSV or MySQL dump to IR
   guardian - Generate Guardian API shell script from IR
   migrate  - Full end-to-end migration (ranger/sentry -> Guardian script)
 
@@ -37,8 +37,8 @@ def cmd_ranger(args):
 
 
 def cmd_sentry(args):
-    from sentry_to_ir import parse_sentry_csv
-    plan = parse_sentry_csv(args.input)
+    from sentry_sql_to_ir import parse_sentry_export
+    plan = parse_sentry_export(args.input)
     _write_plan(plan, args.output)
     _print_summary(plan)
 
@@ -64,8 +64,8 @@ def cmd_migrate(args):
         from ranger_to_ir import parse_ranger_export
         plan = parse_ranger_export(args.source_input)
     elif args.source == "sentry":
-        from sentry_to_ir import parse_sentry_csv
-        plan = parse_sentry_csv(args.source_input)
+        from sentry_sql_to_ir import parse_sentry_export
+        plan = parse_sentry_export(args.source_input)
     else:
         print(f"Unknown source type: {args.source}", file=sys.stderr)
         sys.exit(1)
@@ -129,6 +129,7 @@ def _plan_to_dict(plan) -> dict:
         "groups": sorted(plan.groups),
         "roles": sorted(plan.roles),
         "role_group_assignments": {k: sorted(v) for k, v in plan.role_group_assignments.items()},
+        "role_user_assignments": {k: sorted(v) for k, v in plan.role_user_assignments.items()},
         "group_user_assignments": {k: sorted(v) for k, v in plan.group_user_assignments.items()},
         "policies": policies,
     }
@@ -162,6 +163,7 @@ def _plan_from_dict(d: dict):
     plan.groups = set(d.get("groups", []))
     plan.roles = set(d.get("roles", []))
     plan.role_group_assignments = {k: set(v) for k, v in d.get("role_group_assignments", {}).items()}
+    plan.role_user_assignments = {k: set(v) for k, v in d.get("role_user_assignments", {}).items()}
     plan.group_user_assignments = {k: set(v) for k, v in d.get("group_user_assignments", {}).items()}
 
     for policy_data in d.get("policies", []):
@@ -229,6 +231,17 @@ def _print_summary(plan):
     print(f"Groups:   {len(plan.groups)}")
     print(f"Roles:    {len(plan.roles)}")
     print(f"Policies: {len(plan.policies)}")
+    metadata = plan.source_metadata
+    if metadata.get("source") == "sentry-sql":
+        versions = metadata.get("schema_versions") or []
+        if versions:
+            print(f"Sentry schema: {', '.join(versions)}")
+        skipped_gm = metadata.get("skipped_generic_model_privileges", 0)
+        if skipped_gm:
+            print(f"Skipped GM privilege mappings: {skipped_gm}")
+        unresolved = metadata.get("unresolved_references") or {}
+        if unresolved:
+            print(f"Unresolved references: {json.dumps(unresolved, ensure_ascii=False)}")
 
 
 def _component_overrides(args) -> dict[str, str]:
@@ -256,7 +269,7 @@ def main():
     p_ranger.add_argument("--output", "-o")
 
     # sentry
-    p_sentry = sub.add_parser("sentry", help="Parse Sentry CSV export to IR")
+    p_sentry = sub.add_parser("sentry", help="Parse Sentry CSV/TSV or MySQL dump to IR")
     p_sentry.add_argument("--input", "-i", required=True)
     p_sentry.add_argument("--output", "-o")
 

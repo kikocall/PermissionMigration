@@ -124,5 +124,6 @@ class MigrationPlan:
     groups: set[str] = field(default_factory=set)
     roles: set[str] = field(default_factory=set)
     role_group_assignments: dict[str, set[str]] = field(default_factory=dict)
+    role_user_assignments: dict[str, set[str]] = field(default_factory=dict)
     group_user_assignments: dict[str, set[str]] = field(default_factory=dict)
     source_metadata: dict = field(default_factory=dict)

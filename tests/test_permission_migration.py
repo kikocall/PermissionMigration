@@ -16,10 +16,101 @@ from src.models import (
 )
 from src.ranger_to_ir import parse_ranger_export
 from src.sentry_to_ir import parse_sentry_csv
+from src.sentry_sql_to_ir import parse_sentry_sql_dump
 from src.utils import merge_policies
 
 
 class PermissionMigrationTests(unittest.TestCase):
+    def test_sentry_mysql_dump_joins_roles_groups_users_and_privileges(self):
+        dump = r"""
+CREATE TABLE `sentry_db_privilege` (
+  `DB_PRIVILEGE_ID` bigint(20) NOT NULL,
+  `PRIVILEGE_SCOPE` varchar(32) NOT NULL,
+  `SERVER_NAME` varchar(128) NOT NULL,
+  `DB_NAME` varchar(128) DEFAULT '__NULL__',
+  `TABLE_NAME` varchar(128) DEFAULT '__NULL__',
+  `COLUMN_NAME` varchar(128) DEFAULT '__NULL__',
+  `URI` varchar(4000) DEFAULT '__NULL__',
+  `ACTION` varchar(128) NOT NULL,
+  `CREATE_TIME` bigint(20) NOT NULL,
+  `WITH_GRANT_OPTION` char(1) NOT NULL
+);
+CREATE TABLE `sentry_role` (`ROLE_ID` bigint NOT NULL, `ROLE_NAME` varchar(128), `CREATE_TIME` bigint);
+CREATE TABLE `sentry_group` (`GROUP_ID` bigint NOT NULL, `GROUP_NAME` varchar(128), `CREATE_TIME` bigint);
+CREATE TABLE `sentry_user` (`USER_ID` bigint NOT NULL, `USER_NAME` varchar(128), `CREATE_TIME` bigint);
+CREATE TABLE `sentry_role_db_privilege_map` (`ROLE_ID` bigint, `DB_PRIVILEGE_ID` bigint, `GRANTOR_PRINCIPAL` varchar(128));
+CREATE TABLE `sentry_user_db_privilege_map` (`USER_ID` bigint, `DB_PRIVILEGE_ID` bigint, `GRANTOR_PRINCIPAL` varchar(128));
+CREATE TABLE `sentry_role_group_map` (`ROLE_ID` bigint, `GROUP_ID` bigint, `GRANTOR_PRINCIPAL` varchar(128));
+CREATE TABLE `sentry_role_user_map` (`ROLE_ID` bigint, `USER_ID` bigint, `GRANTOR_PRINCIPAL` varchar(128));
+CREATE TABLE `authz_path` (`PATH_ID` bigint, `PATH_NAME` varchar(4000), `AUTHZ_OBJ_ID` bigint);
+INSERT INTO `sentry_role` VALUES (1,'finance_role',1000);
+INSERT INTO `sentry_group` VALUES (10,'finance_group',1000);
+INSERT INTO `sentry_user` VALUES (20,'alice',1000),(21,'o\\'reilly',1000);
+INSERT INTO `sentry_db_privilege` VALUES
+  (100,'TABLE','server1','sales','orders','__NULL__','__NULL__','select',1000,'Y'),
+  (101,'URI','server1','__NULL__','__NULL__','__NULL__','hdfs://ns1/data/team','all',1000,'N');
+INSERT INTO `sentry_role_db_privilege_map` VALUES (1,100,'admin');
+INSERT INTO `sentry_user_db_privilege_map` VALUES (20,101,'admin');
+INSERT INTO `sentry_role_group_map` VALUES (1,10,'admin');
+INSERT INTO `sentry_role_user_map` VALUES (1,20,'admin');
+INSERT INTO `authz_path` VALUES (1,'/warehouse/sales/orders',123);
+"""
+        dump = dump.replace("o\\\\\\\\'reilly", "o\\\\'reilly")
+        dump = dump.replace("o" + chr(92) * 2 + "'reilly", "o" + chr(92) + "'reilly")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "sentry.sql"
+            path.write_text(dump, encoding="utf-8")
+            plan = parse_sentry_sql_dump(str(path))
+
+            script_path = Path(td) / "guardian.sh"
+            generate_script(
+                plan,
+                str(script_path),
+                base_url="https://guardian.example",
+                access_token="unit-token",
+            )
+            guardian_script = script_path.read_text(encoding="utf-8")
+
+        self.assertEqual(plan.roles, {"finance_role"})
+        self.assertEqual(plan.groups, {"finance_group"})
+        self.assertEqual(plan.users, {"alice", "o'reilly"})
+        self.assertEqual(plan.role_group_assignments, {"finance_role": {"finance_group"}})
+        self.assertEqual(plan.role_user_assignments, {"finance_role": {"alice"}})
+        self.assertIn('"name": "alice", "principalType": "USER", "roleName": "finance_role"', guardian_script)
+        perms = [pm for policy in plan.policies for pm in policy.permissions]
+        self.assertEqual(len(perms), 5)
+        role_select = next(pm for pm in perms if pm.principal.name == "finance_role")
+        self.assertEqual(role_select.resource.to_guardian_data_source(), ["TABLE_OR_VIEW", "sales", "orders"])
+        self.assertTrue(role_select.grantable)
+        alice_actions = sorted(pm.action for pm in perms if pm.principal.name == "alice")
+        self.assertEqual(alice_actions, ["ADMIN", "EXECUTE", "READ", "WRITE"])
+        alice_ds = next(pm.resource.to_guardian_data_source() for pm in perms if pm.principal.name == "alice")
+        self.assertEqual(alice_ds, ["PATH", "/", "ns1", "data", "team"])
+
+    def test_sentry_mysql_dump_supports_insert_column_lists_and_nulls(self):
+        dump = """
+CREATE TABLE `SENTRY_ROLE` (`ROLE_ID` bigint, `ROLE_NAME` varchar(128), `CREATE_TIME` bigint);
+CREATE TABLE `SENTRY_DB_PRIVILEGE` (
+ `DB_PRIVILEGE_ID` bigint, `PRIVILEGE_SCOPE` varchar(32), `SERVER_NAME` varchar(128),
+ `DB_NAME` varchar(128), `TABLE_NAME` varchar(128), `COLUMN_NAME` varchar(128),
+ `URI` varchar(4000), `ACTION` varchar(128), `CREATE_TIME` bigint, `WITH_GRANT_OPTION` char(1)
+);
+CREATE TABLE `SENTRY_ROLE_DB_PRIVILEGE_MAP` (`ROLE_ID` bigint, `DB_PRIVILEGE_ID` bigint);
+INSERT INTO SENTRY_ROLE (`ROLE_NAME`,`ROLE_ID`,`CREATE_TIME`) VALUES ('r1',1,0);
+INSERT INTO SENTRY_DB_PRIVILEGE
+ (`ACTION`,`DB_PRIVILEGE_ID`,`PRIVILEGE_SCOPE`,`SERVER_NAME`,`DB_NAME`,`TABLE_NAME`,`COLUMN_NAME`,`URI`,`CREATE_TIME`,`WITH_GRANT_OPTION`)
+ VALUES ('select',2,'DATABASE','server1','analytics',NULL,NULL,NULL,0,'N');
+INSERT INTO SENTRY_ROLE_DB_PRIVILEGE_MAP (`DB_PRIVILEGE_ID`,`ROLE_ID`) VALUES (2,1);
+"""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "columns.sql"
+            path.write_text(dump, encoding="utf-8")
+            plan = parse_sentry_sql_dump(str(path))
+
+        perm = plan.policies[0].permissions[0]
+        self.assertEqual(perm.principal.name, "r1")
+        self.assertEqual(perm.resource.to_guardian_data_source(), ["TABLE_OR_VIEW", "analytics"])
+
     def test_sentry_tsv_and_wildcard_expand_hdfs(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "sentry.tsv"
@@ -243,6 +334,7 @@ class PermissionMigrationTests(unittest.TestCase):
                 )
             ],
             roles={"role1"},
+            role_user_assignments={"role1": {"alice"}},
         )
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "ir.json"
@@ -255,6 +347,7 @@ class PermissionMigrationTests(unittest.TestCase):
         self.assertFalse(perm.administrative)
         self.assertEqual(perm.resource.partition, "ds=20260528")
         self.assertEqual(loaded.policies[0].description, "demo")
+        self.assertEqual(loaded.role_user_assignments, {"role1": {"alice"}})
 
     def test_merge_policies_deduplicates_permission_entries(self):
         resource = ResourcePath(service_type=ServiceType.HIVE, database="db", table="tbl")
