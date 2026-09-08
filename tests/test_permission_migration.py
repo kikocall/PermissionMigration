@@ -22,6 +22,58 @@ from src.utils import filter_plan_by_users, merge_policies, merge_user_group_mem
 
 
 class PermissionMigrationTests(unittest.TestCase):
+    def test_sentry_sql_skips_local_file_uri_but_keeps_hdfs_uri(self):
+        dump = r"""
+CREATE TABLE `sentry_db_privilege` (
+  `DB_PRIVILEGE_ID` bigint, `PRIVILEGE_SCOPE` varchar(32),
+  `SERVER_NAME` varchar(128), `DB_NAME` varchar(128),
+  `TABLE_NAME` varchar(128), `COLUMN_NAME` varchar(128),
+  `URI` varchar(4000), `ACTION` varchar(128),
+  `CREATE_TIME` bigint, `WITH_GRANT_OPTION` char(1)
+);
+CREATE TABLE `sentry_role` (`ROLE_ID` bigint, `ROLE_NAME` varchar(128), `CREATE_TIME` bigint);
+CREATE TABLE `sentry_role_db_privilege_map` (`ROLE_ID` bigint, `DB_PRIVILEGE_ID` bigint);
+INSERT INTO `sentry_role` VALUES (1,'data_role',1);
+INSERT INTO `sentry_db_privilege` VALUES
+  (10,'URI','server1','__NULL__','__NULL__','__NULL__','file:///tmp','all',1,'N'),
+  (11,'URI','server1','__NULL__','__NULL__','__NULL__','FILE:/opt/hive/lib','all',1,'N'),
+  (12,'URI','server1','__NULL__','__NULL__','__NULL__','hdfs://ns1/data/team','all',1,'N'),
+  (13,'URI','server1','__NULL__','__NULL__','__NULL__','/user/team','all',1,'N');
+INSERT INTO `sentry_role_db_privilege_map` VALUES (1,10),(1,11),(1,12),(1,13);
+"""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "sentry.sql"
+            path.write_text(dump, encoding="utf-8")
+            plan = parse_sentry_sql_dump(str(path))
+
+        paths = {
+            permission.resource.path
+            for policy in plan.policies
+            for permission in policy.permissions
+        }
+        self.assertEqual(paths, {"hdfs://ns1/data/team", "/user/team"})
+        self.assertEqual(plan.source_metadata["skipped_local_file_uri_privileges"], 2)
+        self.assertEqual(
+            {item["uri"] for item in plan.source_metadata["local_file_uri_examples"]},
+            {"file:///tmp", "FILE:/opt/hive/lib"},
+        )
+
+    def test_sentry_csv_skips_local_file_uri(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "sentry.csv"
+            path.write_text(
+                "database,table,partition,column,principal_name,principal_type,privilege,grant_option\n"
+                "file:///tmp,,,,local_role,ROLE,ALL,FALSE\n"
+                "/data/team,,,,hdfs_role,ROLE,ALL,FALSE\n",
+                encoding="utf-8",
+            )
+            plan = parse_sentry_csv(str(path))
+
+        self.assertEqual(plan.roles, {"local_role", "hdfs_role"})
+        self.assertEqual(len(plan.policies), 1)
+        self.assertEqual(plan.policies[0].permissions[0].principal.name, "hdfs_role")
+        self.assertEqual(plan.source_metadata["skipped_local_file_uri_privileges"], 1)
+
     def test_sentry_guardian_actions_follow_resource_scope(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "actions.csv"

@@ -383,6 +383,9 @@ def _print_summary(plan):
         ignored_groups = external_groups.get("ignored_groups") or []
         if ignored_groups:
             print(f"Ignored external groups: {len(ignored_groups)}")
+    skipped_local = metadata.get("skipped_local_file_uri_privileges", 0)
+    if skipped_local:
+        print(f"Skipped local file URI privileges: {skipped_local}")
     if metadata.get("source") == "sentry-sql":
         versions = metadata.get("schema_versions") or []
         if versions:

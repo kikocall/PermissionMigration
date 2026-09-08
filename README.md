@@ -26,7 +26,7 @@ Ranger 从 Service Manager 导出的权限是 JSON；从 Reports 页面也可以
 
 Cloudera 官方迁移工具 `authzmigrator` 通常将 Sentry 权限导出为 JSON，例如 `permissions.json`，可覆盖 Hive object、URI/URL 以及 Kafka 等权限。当前项目中的 `sentry_export_example.csv` 是一个整理后的 CSV 权限表，字段为：
 
-- `database`: Hive database，或 HDFS/URI 路径，例如 `/user/...`、`file:///tmp`、`hdfs://nameservice/path`。
+- `database`: Hive database，或文件系统 URI，例如 `/user/...`、`file:///tmp`、`hdfs://nameservice/path`。其中 `file:` 是本地文件 URI，不会导入 Guardian。
 - `table`: Hive table/view。
 - `partition`: Hive partition。
 - `column`: Hive column。
@@ -101,7 +101,9 @@ Guardian API 的调用格式严格沿用 `sentry_to_guardian.py` 中已有样例
 }
 ```
 
-Hive 表权限的 `dataSource` 使用 `["TABLE_OR_VIEW", database, table, partition, column]`，后面的层级按实际存在字段追加。HDFS/URI 权限使用旧脚本格式 `["PATH", "/", ...pathParts]`。例如 `/user/team` 会生成 `["PATH", "/", "user", "team"]`。
+Hive 表权限的 `dataSource` 使用 `["TABLE_OR_VIEW", database, table, partition, column]`，后面的层级按实际存在字段追加。HDFS URI 和无协议绝对路径使用旧脚本格式 `["PATH", "/", ...pathParts]`。例如 `/user/team` 会生成 `["PATH", "/", "user", "team"]`。
+
+`file:///tmp`、`FILE:/opt/...` 等 `file:` URI 明确表示源 HiveServer2/Impala 节点的本地文件系统，不属于 Guardian/TDFS 管理范围。解析器默认跳过这类授权，绝不会把它改写成 HDFS `/tmp`；IR 的 `source_metadata.skipped_local_file_uri_privileges` 会记录数量，`local_file_uri_examples` 最多保留 20 条审计样例，命令摘要也会显示跳过数量。
 
 ## 脚本说明
 
@@ -303,6 +305,7 @@ bash guardian_import.sh
 
 - Hive database/table/partition/column。
 - HDFS/URI 路径。
+- 自动跳过 Guardian 无法管理的 `file:` 本地 URI，并记录审计统计。
 - `ROLE`、`USER`、`GROUP`。
 - 逗号分隔和制表符分隔。
 - `ALL`、`*` 权限展开。

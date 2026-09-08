@@ -117,6 +117,11 @@ def _detect_service_type(database: str) -> ServiceType:
     return ServiceType.HIVE
 
 
+def _is_local_file_uri(value: str) -> bool:
+    """判断是否为 Guardian/TDFS 不管理的本地文件 URI。"""
+    return (value or "").strip().lower().startswith("file:")
+
+
 # ── Resource extraction ─────────────────────────────────────────────────────
 
 def _build_resource(service_type: ServiceType, row: dict[str, str]) -> ResourcePath:
@@ -181,6 +186,9 @@ def parse_sentry_csv(filepath: str) -> MigrationPlan:
     plan.source_metadata["source"] = "sentry"
     plan.source_metadata["file"] = filepath
 
+    skipped_local_file_uris = 0
+    local_file_uri_examples: list[dict[str, object]] = []
+
     with open(filepath, "r", newline="", encoding="utf-8-sig") as csvfile:
         # Auto-detect delimiter
         sample = csvfile.read(4096)
@@ -195,6 +203,39 @@ def parse_sentry_csv(filepath: str) -> MigrationPlan:
             if not database:
                 continue
 
+            principal = _extract_principal(row)
+            if not principal:
+                continue
+
+            # 即使本地 URI 权限被跳过，也保留其主体及成员关系信息。
+            if principal.principal_type == PrincipalType.USER:
+                plan.users.add(principal.name)
+            elif principal.principal_type == PrincipalType.GROUP:
+                plan.groups.add(principal.name)
+            elif principal.principal_type == PrincipalType.ROLE:
+                plan.roles.add(principal.name)
+
+            user_name = row.get("user", "").strip()
+            group_name = row.get("group", "").strip()
+            if group_name and user_name:
+                plan.group_user_assignments.setdefault(group_name, set()).add(user_name)
+                plan.groups.add(group_name)
+                plan.users.add(user_name)
+            if principal.principal_type == PrincipalType.ROLE and group_name:
+                plan.role_group_assignments.setdefault(principal.name, set()).add(group_name)
+                plan.groups.add(group_name)
+
+            if _is_local_file_uri(database):
+                skipped_local_file_uris += 1
+                if len(local_file_uri_examples) < 20:
+                    local_file_uri_examples.append({
+                        "row": row_count,
+                        "uri": database,
+                        "principal": principal.name,
+                        "principal_type": principal.principal_type.value,
+                    })
+                continue
+
             service_type = _detect_service_type(database)
             resource = _build_resource(service_type, row)
 
@@ -207,10 +248,6 @@ def parse_sentry_csv(filepath: str) -> MigrationPlan:
                 resource_scope = "DATABASE"
             actions = _map_privileges(privilege, service_type, resource_scope)
             if not actions:
-                continue
-
-            principal = _extract_principal(row)
-            if not principal:
                 continue
 
             grantable = row.get("grant_option", "").strip().upper() == "TRUE"
@@ -237,26 +274,8 @@ def parse_sentry_csv(filepath: str) -> MigrationPlan:
 
             plan.policies.append(policy)
 
-            # Collect into sets
-            if principal.principal_type == PrincipalType.USER:
-                plan.users.add(principal.name)
-            elif principal.principal_type == PrincipalType.GROUP:
-                plan.groups.add(principal.name)
-            elif principal.principal_type == PrincipalType.ROLE:
-                plan.roles.add(principal.name)
-
-            # Track role-group and group-user assignments from Sentry data
-            user_name = row.get("user", "").strip()
-            group_name = row.get("group", "").strip()
-
-            if group_name and user_name:
-                plan.group_user_assignments.setdefault(group_name, set()).add(user_name)
-                plan.groups.add(group_name)
-                plan.users.add(user_name)
-
-            if principal.principal_type == PrincipalType.ROLE and group_name:
-                plan.role_group_assignments.setdefault(principal.name, set()).add(group_name)
-                plan.groups.add(group_name)
+    plan.source_metadata["skipped_local_file_uri_privileges"] = skipped_local_file_uris
+    plan.source_metadata["local_file_uri_examples"] = local_file_uri_examples
 
     return plan
 

@@ -23,7 +23,7 @@ try:
         ResourcePath,
         ServiceType,
     )
-    from .sentry_to_ir import _map_privileges
+    from .sentry_to_ir import _is_local_file_uri, _map_privileges
 except ImportError:
     from models import (  # type: ignore  # noqa
         MigrationPlan,
@@ -34,7 +34,7 @@ except ImportError:
         ResourcePath,
         ServiceType,
     )
-    from sentry_to_ir import _map_privileges  # type: ignore  # noqa
+    from sentry_to_ir import _is_local_file_uri, _map_privileges  # type: ignore  # noqa
 
 
 class SentrySqlParseError(ValueError):
@@ -462,6 +462,8 @@ def parse_sentry_sql_dump(filepath: str) -> MigrationPlan:
     plan.roles.update(roles.values())
 
     unresolved = {"role_group": 0, "role_user": 0, "role_privilege": 0, "user_privilege": 0}
+    skipped_local_file_uris = 0
+    local_file_uri_examples: list[dict[str, str]] = []
 
     for mapping in rows["sentry_role_group_map"]:
         role = roles.get(_clean(mapping.get("ROLE_ID")) or "")
@@ -480,6 +482,18 @@ def parse_sentry_sql_dump(filepath: str) -> MigrationPlan:
             unresolved["role_user"] += 1
 
     def add_permission(principal_name: str, principal_type: PrincipalType, privilege: dict[str, object]) -> None:
+        nonlocal skipped_local_file_uris
+        uri = _clean(privilege.get("URI")) or ""
+        if _is_local_file_uri(uri):
+            skipped_local_file_uris += 1
+            if len(local_file_uri_examples) < 20:
+                local_file_uri_examples.append({
+                    "uri": uri,
+                    "principal": principal_name,
+                    "principal_type": principal_type.value,
+                    "action": _clean(privilege.get("ACTION")) or "",
+                })
+            return
         resource = _resource_from_privilege(privilege)
         action = _clean(privilege.get("ACTION")) or ""
         scope = _clean(privilege.get("PRIVILEGE_SCOPE")) or "UNKNOWN"
@@ -536,11 +550,14 @@ def parse_sentry_sql_dump(filepath: str) -> MigrationPlan:
         "ddl_tables": sorted(reader.schemas),
         "dump_tables": sorted(reader.seen_tables),
         "skipped_generic_model_privileges": len(rows["sentry_role_gm_privilege_map"]),
+        "skipped_local_file_uri_privileges": skipped_local_file_uris,
+        "local_file_uri_examples": local_file_uri_examples,
         "unresolved_references": {key: value for key, value in unresolved.items() if value},
         "limitations": [
             "Sentry 元数据库不包含 LDAP/操作系统组的用户成员关系，未生成组到用户关系。",
             "AUTHZ_PATH/AUTHZ_PATHS_MAPPING 是 HDFS 同步索引，不作为权限导入。",
             "SENTRY_GM_PRIVILEGE（Kafka/Solr 等通用模型）尚未映射到 Guardian。",
+            "file: 本地文件 URI 不属于 Guardian/TDFS 管理范围，已跳过并记录。",
         ],
     }
     return plan
