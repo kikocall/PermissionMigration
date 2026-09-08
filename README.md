@@ -36,7 +36,15 @@ Cloudera 官方迁移工具 `authzmigrator` 通常将 Sentry 权限导出为 JSO
 - `grant_option`: 是否可转授权。
 - `grant_time`、`grantor`: 审计字段。
 
-本工具兼容逗号分隔 CSV 和制表符分隔 TSV。Sentry 的 `ALL` 或 `*` 会按旧脚本逻辑展开：Hive 展开为 `CREATE, SELECT, INSERT, UPDATE, DELETE, ADMIN`；HDFS/URI 路径展开为 `READ, WRITE, EXECUTE, ADMIN`。
+本工具兼容逗号分隔 CSV 和制表符分隔 TSV。权限严格按 Guardian 的资源类型展开：
+
+| Guardian 资源 | 有效权限 |
+|---|---|
+| Hive 数据库 | `CREATE, SELECT, INSERT, UPDATE, DELETE, ADMIN, ACCESS` |
+| Hive 表/分区/列 | `SELECT, INSERT, UPDATE, DELETE, ADMIN` |
+| HDFS 路径 | `READ, WRITE, EXECUTE, ADMIN, ACCESS` |
+
+Sentry 的 `ALL` 或 `*` 展开为对应资源行中的全部权限；Sentry `OWNER` 映射为 Guardian `ADMIN`。不属于目标资源类型的动作不会生成无效 Guardian API 请求。
 
 #### Sentry MySQL dump 格式
 
@@ -63,7 +71,7 @@ Cloudera 官方迁移工具 `authzmigrator` 通常将 Sentry 权限导出为 JSO
 | `sentry_perm_change`、`sentry_path_change`、`sentry_hms_notification_id` | 增量变更与 HMS 同步状态 | 忽略 |
 | `sequence_table` | DataNucleus/JDO 主键序列 | 忽略 |
 
-Sentry 元数据库保存“组被授予角色”，但不保存 LDAP/操作系统目录中的“用户属于哪些组”。因此 SQL dump 可以恢复角色—组、角色—用户及用户直授权，不能独立恢复组—用户成员关系；如果 Guardian 还需要组成员，必须另行提供 LDAP/AD/操作系统组导出。
+Sentry 元数据库保存“组被授予角色”，但不保存 LDAP/操作系统目录中的“用户属于哪些组”。因此 SQL dump 可以恢复角色—组、角色—用户及用户直授权，不能独立恢复组—用户成员关系。工具通过 `--user-groups-file` 接收另行导出的 LDAP/AD/操作系统用户组关系，并据此补齐所选用户关联的组、角色和继承权限。
 
 ## Guardian API 约束
 
@@ -102,6 +110,7 @@ Hive 表权限的 `dataSource` 使用 `["TABLE_OR_VIEW", database, table, partit
 - `ranger_to_sentry.py`: 旧版 Ranger JSON 转 Sentry CSV 格式脚本。
 - `sentry_to_guardian.py`: 旧版 Sentry CSV 转 Guardian API shell 脚本，是当前 Guardian API payload 格式的参考来源。
 - `sentry_dump_example.sql`: 脱敏的最小 MySQL dump 风格样例。
+- `user_groups.example.csv`: 外部用户—组关系的脱敏格式样例。
 
 ### 新脚本
 
@@ -144,12 +153,24 @@ python -m src.cli sentry \
   --export-users output/all_users.txt
 ```
 
-`all_users.txt` 每行一个用户名且没有表头。复制或编辑得到 `selected_users.txt`，只保留需要导入的用户；允许空行及以 `#` 开头的注释。然后从完整 IR 生成筛选后的 Guardian 脚本，无需再次解析大型 dump：
+`all_users.txt` 每行一个用户名且没有表头。复制或编辑得到 `selected_users.txt`，只保留需要导入的用户；允许空行及以 `#` 开头的注释。
+
+由于 Sentry dump 不包含目录服务的用户组成员关系，还需准备 `user_groups.csv`。文件可为 CSV 或 TSV，首行表头可选，每行一条关系：
+
+```csv
+user,group
+alice,finance_group
+alice,analytics_group
+bob,audit_group
+```
+
+然后从完整 IR 生成筛选后的 Guardian 脚本，无需再次解析大型 dump：
 
 ```bash
 python -m src.cli guardian \
   --input output/sentry_full_ir.json \
   --users-file selected_users.txt \
+  --user-groups-file user_groups.csv \
   --output output/guardian_selected_users.sh \
   --base-url 'https://guardian.example:8380' \
   --access-token '<guardian_access_token>' \
@@ -164,11 +185,12 @@ python -m src.cli migrate \
   --source sentry \
   --source-input sentry_20260904.sql \
   --users alice,bob \
+  --user-groups-file user_groups.csv \
   --save-ir output/sentry_selected_ir.json \
   --output output/guardian_selected_users.sh
 ```
 
-筛选后的 IR 和 Guardian 脚本只包含：所选用户、用户直授权、直接授予这些用户的角色及角色权限；如果源数据明确包含用户—组关系，也会包含相关组及组角色权限。白名单中存在无法匹配的用户名时命令会报错退出，避免静默漏迁。
+筛选时会计算完整权限闭包：所选用户、用户直授权、直接授予用户的角色、用户所在的 Sentry 组、授予这些组的角色，以及上述主体的全部权限。外部文件中不属于 Sentry dump 的组会被忽略并在摘要中计数，避免创建无关目录组。白名单中存在无法匹配的用户名时命令会报错退出；只要用户至少匹配一个有效 Sentry 组，即使其未出现在 `sentry_user` 表中也可以被导入。
 
 ### 4. 只生成 IR
 
@@ -195,9 +217,9 @@ python -m src.cli guardian `
   --hdfs-component <guardian_hdfs_component>
 ```
 
-如果不传 `--base-url`，脚本会优先读取环境变量 `GUARDIAN_URL`，否则使用 `src/constants.py` 里的默认值。
+如果不传 `--base-url`，脚本会优先读取环境变量 `GUARDIAN_URL`，否则只能得到 `src/constants.py` 中不可直接执行的安全占位地址。
 
-`--access-token` 也可以通过环境变量 `GUARDIAN_ACCESS_TOKEN` 传入。生产环境建议显式指定 `--access-token`、`--hive-component` 和 `--hdfs-component`，不要依赖默认值。不同 TDH 集群、不同租户的 Guardian component 名称可能不同，例如某个集群中 Hive/HDFS component 可能是 `ylhive1`、`ylhdfs1`，而不是默认的 `quark1`、`tdfs1`。
+`--access-token` 也可以通过环境变量 `GUARDIAN_ACCESS_TOKEN` 传入。仓库和发布包不内置真实地址或 token；生产环境必须显式指定 `--base-url`、`--access-token`、`--hive-component` 和 `--hdfs-component`。不同 TDH 集群、不同租户的 Guardian component 名称可能不同，例如某个集群中 Hive/HDFS component 可能是 `ylhive1`、`ylhdfs1`，而不是默认的 `quark1`、`tdfs1`。
 
 ## 生产环境推荐流程
 
@@ -232,6 +254,8 @@ Sentry SQL dump 示例：
 python -m src.cli migrate \
   --source sentry \
   --source-input sentry_20260904.sql \
+  --users-file selected_users.txt \
+  --user-groups-file user_groups.csv \
   --save-ir sentry_ir.json \
   --output guardian_import.sh \
   --base-url https://guardian.example:8380 \
@@ -287,6 +311,7 @@ bash guardian_import.sh
 - MySQL 5.7 `mysqldump` 的 DDL、无列名/带列名 INSERT、extended-insert。
 - 从 `sentry_db_privilege` 和关联表恢复角色权限与用户直授权。
 - 从 `sentry_role_group_map`、`sentry_role_user_map` 恢复角色成员关系。
+- 通过 `--user-groups-file` 合并外部用户—组关系，并恢复所选用户的组角色继承权限。
 - MySQL 反斜杠转义、双单引号、SQL `NULL` 和 Sentry `__NULL__` 占位值。
 - 通过 `--users` 或 `--users-file` 按用户筛选直授权和可确定的继承权限。
 - 通过 `--export-users` 导出全部已解析用户名，供人工制作白名单。
@@ -295,7 +320,7 @@ bash guardian_import.sh
 
 - Cloudera `authzmigrator` 原生 `permissions.json`。后续可以新增 `sentry_json_to_ir.py` 或在 `sentry_to_ir.py` 内自动识别 JSON。
 - Sentry Kafka/Kudu 等非 Hive/URI 权限到 Guardian 的映射，除非补充明确的 Guardian `dataSource` 样例。
-- 从 Sentry SQL dump 恢复 LDAP/AD/操作系统组成员；这些关系不在 Sentry 元数据库中。
+- 仅凭 Sentry SQL dump 自动恢复 LDAP/AD/操作系统组成员；这些关系不在 Sentry 元数据库中，必须通过 `--user-groups-file` 提供。
 
 ## 验证
 
@@ -334,6 +359,7 @@ python -m src.cli migrate --source ranger --source-input Ranger_export_example.j
 - `src/`: 新版转换脚本。
 - `README.md`: 使用说明。
 - `tests/`: 可选，用于生产环境执行前自检。
+- `sentry_dump_example.sql`、`user_groups.example.csv`: 脱敏输入格式样例。
 
 发布包不应包含：
 

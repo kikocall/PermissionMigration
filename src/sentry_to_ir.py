@@ -47,8 +47,11 @@ except ImportError:
 
 # ── Action normalization ────────────────────────────────────────────────────
 
-_SENTRY_HIVE_EXPANDED = ["CREATE", "SELECT", "INSERT", "UPDATE", "DELETE", "ADMIN"]
-_SENTRY_HDFS_EXPANDED = ["READ", "WRITE", "EXECUTE", "ADMIN"]
+_GUARDIAN_DATABASE_ACTIONS = [
+    "CREATE", "SELECT", "INSERT", "UPDATE", "DELETE", "ADMIN", "ACCESS",
+]
+_GUARDIAN_TABLE_ACTIONS = ["SELECT", "INSERT", "UPDATE", "DELETE", "ADMIN"]
+_GUARDIAN_HDFS_ACTIONS = ["READ", "WRITE", "EXECUTE", "ADMIN", "ACCESS"]
 
 # Sentry privilege strings -> Guardian Hive actions
 _SENTRY_TO_GUARDIAN: dict[str, str] = {
@@ -63,26 +66,41 @@ _SENTRY_TO_GUARDIAN: dict[str, str] = {
     "drop": "DELETE",
     "index": "ADMIN",
     "lock": "ADMIN",
+    "owner": "ADMIN",
+    "access": "ACCESS",
 }
 
 
-def _map_privileges(priv: str, service_type: ServiceType) -> list[str]:
-    """Map a Sentry privilege string to one or more Guardian actions."""
+def _map_privileges(
+    priv: str,
+    service_type: ServiceType,
+    resource_scope: str = "",
+) -> list[str]:
+    """按 Guardian 的资源层级映射 Sentry 权限动作。"""
+    scope = resource_scope.strip().upper()
+    if service_type == ServiceType.HDFS:
+        allowed_actions = _GUARDIAN_HDFS_ACTIONS
+    elif scope in {"TABLE", "COLUMN", "PARTITION"}:
+        allowed_actions = _GUARDIAN_TABLE_ACTIONS
+    else:
+        allowed_actions = _GUARDIAN_DATABASE_ACTIONS
+
     actions: list[str] = []
     for item in (priv or "").split(","):
         lower = item.strip().lower()
         if not lower:
             continue
         if lower in {"all", "*"}:
-            actions.extend(
-                _SENTRY_HDFS_EXPANDED
-                if service_type == ServiceType.HDFS
-                else _SENTRY_HIVE_EXPANDED
-            )
-        elif lower == "admin":
-            actions.append("ADMIN")
+            actions.extend(allowed_actions)
         else:
-            actions.append(_SENTRY_TO_GUARDIAN.get(lower, lower.upper()))
+            if service_type == ServiceType.HDFS and lower in {
+                "read", "write", "execute", "admin", "access",
+            }:
+                mapped = lower.upper()
+            else:
+                mapped = _SENTRY_TO_GUARDIAN.get(lower, lower.upper())
+            if mapped in allowed_actions:
+                actions.append(mapped)
     return list(dict.fromkeys(actions))
 
 
@@ -181,7 +199,13 @@ def parse_sentry_csv(filepath: str) -> MigrationPlan:
             resource = _build_resource(service_type, row)
 
             privilege = row.get("privilege", "").strip()
-            actions = _map_privileges(privilege, service_type)
+            if service_type == ServiceType.HDFS:
+                resource_scope = "PATH"
+            elif resource.table or resource.partition or resource.column:
+                resource_scope = "TABLE"
+            else:
+                resource_scope = "DATABASE"
+            actions = _map_privileges(privilege, service_type, resource_scope)
             if not actions:
                 continue
 

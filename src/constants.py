@@ -5,9 +5,9 @@ reference implementation in sentry_to_guardian.py.
 """
 from __future__ import annotations
 
-# Default Guardian API endpoint and credentials
-DEFAULT_GUARDIAN_URL = "https://147.80.29.17:8380"
-DEFAULT_GUARDIAN_TOKEN = "MajRDkS61VVw4kKESlnD-TDH"
+# 安全占位值：生产运行时请通过命令行参数或环境变量显式传入。
+DEFAULT_GUARDIAN_URL = "https://guardian.example:8380"
+DEFAULT_GUARDIAN_TOKEN = "REPLACE_WITH_GUARDIAN_ACCESS_TOKEN"
 
 # Default user profile values
 DEFAULT_USER_DOMAIN = "@unionpay.io"

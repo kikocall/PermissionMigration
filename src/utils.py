@@ -111,6 +111,47 @@ def filter_plan_by_users(
     return filtered
 
 
+def merge_user_group_memberships(
+    plan: MigrationPlan,
+    memberships: dict[str, set[str]],
+) -> MigrationPlan:
+    """把外部目录的用户—组关系合并进计划。
+
+    只接纳 Sentry 元数据中已经存在的组，避免把与本次迁移无关的 LDAP/AD
+    组创建到 Guardian。接纳成功的用户会加入 ``plan.users``，因此即使该用户
+    没有出现在 ``sentry_user`` 表中，也可以通过组权限被选择迁移。
+    """
+    known_groups = plan.groups
+    accepted_users: set[str] = set()
+    ignored_groups: set[str] = set()
+    membership_count = 0
+
+    for raw_user, raw_groups in memberships.items():
+        user = raw_user.strip()
+        if not user:
+            continue
+        for raw_group in raw_groups:
+            group = raw_group.strip()
+            if not group:
+                continue
+            if group not in known_groups:
+                ignored_groups.add(group)
+                continue
+            members = plan.group_user_assignments.setdefault(group, set())
+            if user not in members:
+                members.add(user)
+                membership_count += 1
+            plan.users.add(user)
+            accepted_users.add(user)
+
+    plan.source_metadata["external_user_groups"] = {
+        "user_count": len(accepted_users),
+        "membership_count": membership_count,
+        "ignored_groups": sorted(ignored_groups),
+    }
+    return plan
+
+
 def service_type_from_ranger_name(name: str) -> ServiceType:
     """Normalize a Ranger service-type string to ServiceType enum."""
     if not name:

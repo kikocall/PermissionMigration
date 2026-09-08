@@ -18,10 +18,83 @@ from src.models import (
 from src.ranger_to_ir import parse_ranger_export
 from src.sentry_to_ir import parse_sentry_csv
 from src.sentry_sql_to_ir import parse_sentry_sql_dump
-from src.utils import filter_plan_by_users, merge_policies
+from src.utils import filter_plan_by_users, merge_policies, merge_user_group_memberships
 
 
 class PermissionMigrationTests(unittest.TestCase):
+    def test_sentry_guardian_actions_follow_resource_scope(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "actions.csv"
+            path.write_text(
+                "database,table,partition,column,principal_name,principal_type,privilege,grant_option\n"
+                "analytics,,,,db_role,ROLE,ALL,FALSE\n"
+                "analytics,orders,,,table_role,ROLE,ALL,FALSE\n"
+                "/data/team,,,,hdfs_role,ROLE,ALL,FALSE\n"
+                "analytics,orders,,,owner_role,ROLE,OWNER,FALSE\n",
+                encoding="utf-8",
+            )
+            plan = parse_sentry_csv(str(path))
+
+        actions = {
+            policy.permissions[0].principal.name: {
+                permission.action for permission in policy.permissions
+            }
+            for policy in plan.policies
+        }
+        self.assertEqual(
+            actions["db_role"],
+            {"CREATE", "SELECT", "INSERT", "UPDATE", "DELETE", "ADMIN", "ACCESS"},
+        )
+        self.assertEqual(
+            actions["table_role"],
+            {"SELECT", "INSERT", "UPDATE", "DELETE", "ADMIN"},
+        )
+        self.assertEqual(
+            actions["hdfs_role"],
+            {"READ", "WRITE", "EXECUTE", "ADMIN", "ACCESS"},
+        )
+        self.assertEqual(actions["owner_role"], {"ADMIN"})
+
+    def test_external_user_group_membership_includes_group_roles_and_permissions(self):
+        resource = ResourcePath(service_type=ServiceType.HIVE, database="db", table="orders")
+        plan = MigrationPlan(
+            policies=[
+                Policy(
+                    source="unit",
+                    service_type=ServiceType.HIVE,
+                    service_name="hive",
+                    resources=[resource],
+                    permissions=[
+                        PermissionEntry(
+                            "SELECT",
+                            resource,
+                            Principal("finance_role", PrincipalType.ROLE),
+                        )
+                    ],
+                )
+            ],
+            groups={"finance_group"},
+            roles={"finance_role"},
+            role_group_assignments={"finance_role": {"finance_group"}},
+        )
+
+        merge_user_group_memberships(
+            plan,
+            {"alice": {"finance_group", "unrelated_ldap_group"}},
+        )
+        filtered = filter_plan_by_users(plan, {"alice"})
+
+        self.assertEqual(filtered.users, {"alice"})
+        self.assertEqual(filtered.groups, {"finance_group"})
+        self.assertEqual(filtered.roles, {"finance_role"})
+        self.assertEqual(filtered.group_user_assignments, {"finance_group": {"alice"}})
+        self.assertEqual(filtered.role_group_assignments, {"finance_role": {"finance_group"}})
+        self.assertEqual(filtered.policies[0].permissions[0].action, "SELECT")
+        self.assertEqual(
+            plan.source_metadata["external_user_groups"]["ignored_groups"],
+            ["unrelated_ldap_group"],
+        )
+
     def test_filter_plan_by_users_keeps_direct_and_inherited_permissions(self):
         def policy(name, principal_type, action="SELECT"):
             resource = ResourcePath(
@@ -152,6 +225,57 @@ class PermissionMigrationTests(unittest.TestCase):
         self.assertIn('"roleName": "alice_role"', script)
         self.assertNotIn("bob", script)
 
+    def test_guardian_cli_uses_external_group_membership_for_user_filter(self):
+        resource = ResourcePath(service_type=ServiceType.HIVE, database="db", table="orders")
+        plan = MigrationPlan(
+            policies=[
+                Policy(
+                    source="unit",
+                    service_type=ServiceType.HIVE,
+                    service_name="hive",
+                    resources=[resource],
+                    permissions=[PermissionEntry(
+                        "SELECT",
+                        resource,
+                        Principal("finance_role", PrincipalType.ROLE),
+                    )],
+                )
+            ],
+            groups={"finance_group"},
+            roles={"finance_role"},
+            role_group_assignments={"finance_role": {"finance_group"}},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            full_ir = Path(td) / "full.json"
+            selected_users = Path(td) / "selected.txt"
+            user_groups = Path(td) / "user_groups.csv"
+            output = Path(td) / "selected.sh"
+            _write_plan(plan, str(full_ir))
+            selected_users.write_text("alice\n", encoding="utf-8")
+            user_groups.write_text(
+                "user,group\nalice,finance_group\nalice,unrelated_group\n",
+                encoding="utf-8",
+            )
+            cmd_guardian(SimpleNamespace(
+                input=str(full_ir),
+                output=str(output),
+                base_url="https://guardian.example",
+                access_token="unit-token",
+                hive_component="unit-hive",
+                hdfs_component=None,
+                users=None,
+                users_file=str(selected_users),
+                user_groups_file=str(user_groups),
+                export_users=None,
+            ))
+            script = output.read_text(encoding="utf-8")
+
+        self.assertIn('"userName": "alice"', script)
+        self.assertIn('"groupName": "finance_group"', script)
+        self.assertIn('"roleName": "finance_role"', script)
+        self.assertIn('"action": "SELECT"', script)
+        self.assertNotIn("unrelated_group", script)
+
     def test_sentry_mysql_dump_joins_roles_groups_users_and_privileges(self):
         dump = r"""
 CREATE TABLE `sentry_db_privilege` (
@@ -209,12 +333,12 @@ INSERT INTO `authz_path` VALUES (1,'/warehouse/sales/orders',123);
         self.assertEqual(plan.role_user_assignments, {"finance_role": {"alice"}})
         self.assertIn('"name": "alice", "principalType": "USER", "roleName": "finance_role"', guardian_script)
         perms = [pm for policy in plan.policies for pm in policy.permissions]
-        self.assertEqual(len(perms), 5)
+        self.assertEqual(len(perms), 6)
         role_select = next(pm for pm in perms if pm.principal.name == "finance_role")
         self.assertEqual(role_select.resource.to_guardian_data_source(), ["TABLE_OR_VIEW", "sales", "orders"])
         self.assertTrue(role_select.grantable)
         alice_actions = sorted(pm.action for pm in perms if pm.principal.name == "alice")
-        self.assertEqual(alice_actions, ["ADMIN", "EXECUTE", "READ", "WRITE"])
+        self.assertEqual(alice_actions, ["ACCESS", "ADMIN", "EXECUTE", "READ", "WRITE"])
         alice_ds = next(pm.resource.to_guardian_data_source() for pm in perms if pm.principal.name == "alice")
         self.assertEqual(alice_ds, ["PATH", "/", "ns1", "data", "team"])
 
@@ -255,7 +379,7 @@ INSERT INTO SENTRY_ROLE_DB_PRIVILEGE_MAP (`DB_PRIVILEGE_ID`,`ROLE_ID`) VALUES (2
 
         self.assertEqual(len(plan.policies), 1)
         actions = sorted(p.action for p in plan.policies[0].permissions)
-        self.assertEqual(actions, ["ADMIN", "EXECUTE", "READ", "WRITE"])
+        self.assertEqual(actions, ["ACCESS", "ADMIN", "EXECUTE", "READ", "WRITE"])
         self.assertTrue(all(p.grantable for p in plan.policies[0].permissions))
 
     def test_sentry_hdfs_uri_keeps_old_path_parts(self):

@@ -482,7 +482,8 @@ def parse_sentry_sql_dump(filepath: str) -> MigrationPlan:
     def add_permission(principal_name: str, principal_type: PrincipalType, privilege: dict[str, object]) -> None:
         resource = _resource_from_privilege(privilege)
         action = _clean(privilege.get("ACTION")) or ""
-        actions = _map_privileges(action, resource.service_type)
+        scope = _clean(privilege.get("PRIVILEGE_SCOPE")) or "UNKNOWN"
+        actions = _map_privileges(action, resource.service_type, scope)
         if not actions:
             return
         principal = Principal(principal_name, principal_type)
@@ -497,7 +498,6 @@ def parse_sentry_sql_dump(filepath: str) -> MigrationPlan:
             )
             for mapped_action in actions
         ]
-        scope = _clean(privilege.get("PRIVILEGE_SCOPE")) or "UNKNOWN"
         plan.policies.append(Policy(
             source="sentry-sql",
             service_type=resource.service_type,

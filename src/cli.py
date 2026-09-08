@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 import os
@@ -45,6 +46,7 @@ def cmd_sentry(args):
     except ImportError:
         from sentry_sql_to_ir import parse_sentry_export
     plan = parse_sentry_export(args.input)
+    plan = _apply_user_group_mapping(plan, args)
     _export_users(plan, getattr(args, "export_users", None))
     plan = _apply_user_filter(plan, args)
     _write_plan(plan, args.output)
@@ -53,6 +55,7 @@ def cmd_sentry(args):
 
 def cmd_guardian(args):
     plan = _load_plan(args.input)
+    plan = _apply_user_group_mapping(plan, args)
     _export_users(plan, getattr(args, "export_users", None))
     plan = _apply_user_filter(plan, args)
     _print_summary(plan)
@@ -90,6 +93,7 @@ def cmd_migrate(args):
         print(f"Unknown source type: {args.source}", file=sys.stderr)
         sys.exit(1)
 
+    plan = _apply_user_group_mapping(plan, args)
     _export_users(plan, getattr(args, "export_users", None))
     plan = _apply_user_filter(plan, args)
 
@@ -147,6 +151,52 @@ def _apply_user_filter(plan, args):
         raise SystemExit(f"错误: {error}") from error
 
 
+def _read_user_group_memberships(path: str) -> dict[str, set[str]]:
+    """读取每行一条 ``user,group`` 的 CSV/TSV 用户组关系。"""
+    memberships: dict[str, set[str]] = {}
+    with open(path, "r", encoding="utf-8-sig", newline="") as stream:
+        meaningful_lines = [
+            (line_number, line)
+            for line_number, line in enumerate(stream, start=1)
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+    if not meaningful_lines:
+        raise SystemExit(f"错误: 用户组关系文件为空: {path}")
+    delimiter = "\t" if "\t" in meaningful_lines[0][1] else ","
+    reader = csv.reader((line for _, line in meaningful_lines), delimiter=delimiter)
+    for row_index, row in enumerate(reader):
+        line_number = meaningful_lines[row_index][0]
+        if len(row) < 2:
+            raise SystemExit(
+                f"错误: 用户组关系文件第 {line_number} 行至少需要 user,group 两列"
+            )
+        user, group = row[0].strip(), row[1].strip()
+        if row_index == 0 and user.lower() in {"user", "username", "user_name"} \
+                and group.lower() in {"group", "groupname", "group_name"}:
+            continue
+        if not user or not group:
+            raise SystemExit(
+                f"错误: 用户组关系文件第 {line_number} 行的 user 或 group 为空"
+            )
+        memberships.setdefault(user, set()).add(group)
+    return memberships
+
+
+def _apply_user_group_mapping(plan, args):
+    mapping_file = getattr(args, "user_groups_file", None)
+    if not mapping_file:
+        return plan
+    try:
+        from .utils import merge_user_group_memberships
+    except ImportError:
+        from utils import merge_user_group_memberships
+    return merge_user_group_memberships(
+        plan,
+        _read_user_group_memberships(mapping_file),
+    )
+
+
 def _export_users(plan, output_path: str | None) -> None:
     """导出全部已解析用户，供人工删减后作为 --users-file 使用。"""
     if not output_path:
@@ -176,6 +226,10 @@ def _add_user_filter_args(parser) -> None:
     parser.add_argument(
         "--export-users",
         help="过滤前导出全部已解析用户名，供人工制作白名单",
+    )
+    parser.add_argument(
+        "--user-groups-file",
+        help="外部用户组关系 CSV/TSV，每行 user,group；只接纳 Sentry 中已有的组",
     )
 
 def _plan_to_dict(plan) -> dict:
@@ -323,6 +377,12 @@ def _print_summary(plan):
     if user_filter:
         print(f"Selected users: {len(user_filter.get('selected_users', []))}")
         print(f"Filtered permissions: {user_filter.get('filtered_permission_count', 0)}")
+    external_groups = metadata.get("external_user_groups") or {}
+    if external_groups:
+        print(f"External group memberships: {external_groups.get('membership_count', 0)}")
+        ignored_groups = external_groups.get("ignored_groups") or []
+        if ignored_groups:
+            print(f"Ignored external groups: {len(ignored_groups)}")
     if metadata.get("source") == "sentry-sql":
         versions = metadata.get("schema_versions") or []
         if versions:
