@@ -456,7 +456,7 @@ def main():
     _ensure_src_in_path()
 
     parser = argparse.ArgumentParser(
-        description="Permission Migration Toolchain - Ranger/Sentry to Guardian"
+        description="Permission Migration Toolchain - Ranger/Sentry/Excel to Guardian"
     )
     sub = parser.add_subparsers(dest="command", help="Subcommand")
 

@@ -1,7 +1,7 @@
 """IR (Intermediate Representation) data models for permission migration.
 
 Defines canonical data structures that bridge Ranger JSON exports,
-Sentry CSV exports, and Guardian REST API calls using the exact
+Sentry exports, Guardian batch Excel, and Guardian REST API calls using the exact
 payload schemas from sentry_to_guardian.py.
 """
 from __future__ import annotations

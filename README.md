@@ -4,6 +4,18 @@
 
 本项目的设计目标是：先把来源权限解析成统一 IR，再从 IR 生成 Guardian API shell 脚本。这样 Ranger、Sentry 的字段差异不会直接污染最终赋权脚本，也方便后续补充更多组件和映射规则。
 
+> 完整的安装说明、输入格式、字段定义、命令参数和生产执行流程请查看 [USAGE.md](USAGE.md)。
+
+## 输入方式总览
+
+| 输入 | 入口 | 典型用途 |
+|---|---|---|
+| Ranger JSON | `--source ranger` | 迁移 Ranger 导出的 Hive/HDFS allow policy |
+| Sentry CSV/TSV | `--source sentry` | 迁移已经整理成权限明细表的 Sentry 数据 |
+| Sentry MySQL dump（`.sql`/`.sql.gz`） | `--source sentry` | 直接解析 Sentry 元数据库 dump，不执行其中的 SQL |
+| Guardian 批量权限 Excel | `--source excel` | 人工批量创建用户、组、角色、关系和权限 |
+| 已生成的统一 IR JSON | `guardian` 子命令 | 不重新解析源文件，重复生成或筛选 Guardian 脚本 |
+
 ## 背景调研摘要
 
 ### Ranger 导出格式
