@@ -1,6 +1,6 @@
 # PermissionMigration
 
-将 CDH/CDP 中 Ranger 或 Sentry 导出的权限转换为星环 TDH Guardian 赋权 API 调用脚本。
+将 CDH/CDP 中 Ranger 或 Sentry 导出的权限，以及人工维护的 Excel 批量权限表，转换为星环 TDH Guardian 赋权 API 调用脚本。
 
 本项目的设计目标是：先把来源权限解析成统一 IR，再从 IR 生成 Guardian API shell 脚本。这样 Ranger、Sentry 的字段差异不会直接污染最终赋权脚本，也方便后续补充更多组件和映射规则。
 
@@ -119,12 +119,19 @@ Hive 表权限的 `dataSource` 使用 `["TABLE_OR_VIEW", database, table, partit
 - `src/models.py`: 统一 IR 数据结构，描述资源、主体、权限、策略和迁移计划。
 - `src/ranger_to_ir.py`: 解析 Ranger JSON 导出文件，生成 IR。
 - `src/sentry_to_ir.py`: 解析 Sentry CSV/TSV 权限文件，生成 IR。
+- `src/excel_to_ir.py`: 校验并解析 Guardian 批量权限 Excel，生成 IR。
 - `src/ir_to_guardian.py`: 从 IR 生成 Guardian API shell 脚本。
 - `src/cli.py`: 统一命令行入口。
 - `src/constants.py`: Guardian endpoint、默认配置、权限动作映射。
 - `src/utils.py`: 通用工具函数。
 
 ## 快速使用
+
+首次使用 Excel 输入前安装依赖：
+
+```bash
+python3 -m pip install -r requirements.txt
+```
 
 ### 1. Ranger JSON 转 Guardian 脚本
 
@@ -194,20 +201,46 @@ python -m src.cli migrate \
 
 筛选时会计算完整权限闭包：所选用户、用户直授权、直接授予用户的角色、用户所在的 Sentry 组、授予这些组的角色，以及上述主体的全部权限。外部文件中不属于 Sentry dump 的组会被忽略并在摘要中计数，避免创建无关目录组。白名单中存在无法匹配的用户名时命令会报错退出；只要用户至少匹配一个有效 Sentry 组，即使其未出现在 `sentry_user` 表中也可以被导入。
 
-### 4. 只生成 IR
+### 4. Excel 批量表转 Guardian 脚本
+
+使用 `templates/Guardian_Batch_Permission_Template.xlsx`。三张业务表的第 1 行是填写说明，第 2 行是固定字段名，从第 3 行开始填写数据：
+
+- `UserGroups`：用户、邮箱、明文初始密码、所属组、直接角色。
+- `GroupRoles`：组与角色的对应关系。
+- `Permissions`：授权主体和资源权限；`principal_type` 支持 `USER`、`GROUP`、`ROLE`。
+
+`groups`、`direct_roles`、`roles`、`actions` 中的多个值使用英文逗号分隔。程序根据资源列自动判断类型：只填 `database` 表示 Hive 数据库；填写 `database + table` 表示表；再填 `column` 表示列；只填 `path` 表示 HDFS。Hive 数据库允许 `*` 或 `GLOBAL`，HDFS 路径允许 `/` 或 `GLOBAL`。不支持分区权限，不允许 `OWNER`；可填写 `ALL`，程序会按 Guardian 对应资源的有效动作展开。
+
+```bash
+python -m src.cli migrate \
+  --source excel \
+  --source-input templates/Guardian_Batch_Permission_Template.xlsx \
+  --validation-report output/excel_validation.json \
+  --save-ir output/excel_ir.json \
+  --output output/guardian_excel_import.sh \
+  --base-url 'https://guardian.example:8380' \
+  --access-token '<guardian_access_token>' \
+  --hive-component ylhive1 \
+  --hdfs-component ylhdfs1
+```
+
+解析器会校验整本工作簿并生成逐行 JSON 报告。只要存在错误，就不会生成 IR 或 Guardian shell 脚本；警告不会阻断生成。初始密码会以明文出现在 Excel、IR 和生成脚本中，请限制这些文件的访问权限，用完后按内部安全规范处置。若密码包含前导零，应将密码单元格格式设为文本。
+
+### 5. 只生成 IR
 
 ```powershell
 python -m src.cli ranger --input Ranger_export_example.json --output output\ranger_ir.json
 python -m src.cli sentry --input sentry_export_example.csv --output output\sentry_ir.json
+python -m src.cli excel --input templates\Guardian_Batch_Permission_Template.xlsx --output output\excel_ir.json --validation-report output\excel_validation.json
 ```
 
-### 5. 已有 IR 生成 Guardian 脚本
+### 6. 已有 IR 生成 Guardian 脚本
 
 ```powershell
 python -m src.cli guardian --input output\ranger_ir.json --output output\permission_migration.sh
 ```
 
-### 6. 指定 Guardian 地址、token 和组件名
+### 7. 指定 Guardian 地址、token 和组件名
 
 ```powershell
 python -m src.cli guardian `
@@ -226,7 +259,7 @@ python -m src.cli guardian `
 ## 生产环境推荐流程
 
 1. 在生产环境或跳板机上解压发布包。
-2. 准备 Ranger JSON 或 Sentry CSV/TSV 导出文件。
+2. 准备 Ranger JSON、Sentry CSV/TSV/SQL dump，或 Guardian 批量权限 Excel。
 3. 确认 Guardian Server 地址、`guardian_access_token`、Hive component 名、HDFS component 名。
 4. 先生成 IR 和 Guardian shell 脚本，不要立即执行。
 5. 抽查脚本中的 `component`、`principalType`、`dataSource` 是否符合目标集群。
@@ -325,6 +358,17 @@ bash guardian_import.sh
 - Sentry Kafka/Kudu 等非 Hive/URI 权限到 Guardian 的映射，除非补充明确的 Guardian `dataSource` 样例。
 - 仅凭 Sentry SQL dump 自动恢复 LDAP/AD/操作系统组成员；这些关系不在 Sentry 元数据库中，必须通过 `--user-groups-file` 提供。
 
+### Guardian 批量权限 Excel
+
+已支持：
+
+- 一次创建用户、组、角色，并建立用户—组、用户—角色、组—角色关系。
+- 为用户、组、角色直接授予 Hive 数据库/表/列和 HDFS 路径权限。
+- 使用 Excel 中的邮箱和初始密码创建用户。
+- `ALL` 按资源类型展开，重复权限自动合并。
+- 对整本工作簿做逐行校验并输出 JSON 报告；错误会阻止脚本生成。
+- 自动拒绝本地 `file:` URI、`OWNER`、分区和 Guardian 不支持的动作。
+
 ## 验证
 
 运行单元测试：
@@ -361,6 +405,8 @@ python -m src.cli migrate --source ranger --source-input Ranger_export_example.j
 
 - `src/`: 新版转换脚本。
 - `README.md`: 使用说明。
+- `requirements.txt`: Excel 解析依赖。
+- `templates/Guardian_Batch_Permission_Template.xlsx`: 人工批量录入模板。
 - `tests/`: 可选，用于生产环境执行前自检。
 - `sentry_dump_example.sql`、`user_groups.example.csv`: 脱敏输入格式样例。
 

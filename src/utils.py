@@ -51,6 +51,11 @@ def filter_plan_by_users(
 
     filtered = MigrationPlan(
         users=set(included_users),
+        user_profiles={
+            user_name: copy.deepcopy(profile)
+            for user_name, profile in plan.user_profiles.items()
+            if user_name in included_users
+        },
         groups=set(included_groups),
         roles=set(included_roles),
         role_user_assignments={

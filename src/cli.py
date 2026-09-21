@@ -3,15 +3,18 @@
 Unified CLI supporting:
   ranger  - Parse Ranger JSON export to IR
   sentry  - Parse Sentry CSV/TSV or MySQL dump to IR
+  excel   - Parse Guardian batch Excel template to IR
   guardian - Generate Guardian API shell script from IR
-  migrate  - Full end-to-end migration (ranger/sentry -> Guardian script)
+  migrate  - Full end-to-end migration (ranger/sentry/excel -> Guardian script)
 
 Usage:
   python -m src.cli ranger  --input ranger.json --output ir.json
   python -m src.cli sentry  --input sentry.csv  --output ir.json
+  python -m src.cli excel   --input guardian.xlsx --output ir.json
   python -m src.cli guardian --input ir.json --output script.sh
   python -m src.cli migrate  --source ranger --source-input ranger.json --output script.sh
   python -m src.cli migrate  --source sentry --source-input sentry.csv --output script.sh
+  python -m src.cli migrate  --source excel --source-input guardian.xlsx --output script.sh
 """
 
 from __future__ import annotations
@@ -53,6 +56,34 @@ def cmd_sentry(args):
     _print_summary(plan)
 
 
+def _default_validation_report(input_path: str, output_path: str | None) -> str:
+    base = output_path or os.path.splitext(os.path.basename(input_path))[0]
+    return os.path.splitext(base)[0] + "_validation.json"
+
+
+def _parse_excel(input_path: str, validation_report: str):
+    try:
+        from .excel_to_ir import ExcelValidationError, parse_guardian_excel
+    except ImportError:
+        from excel_to_ir import ExcelValidationError, parse_guardian_excel
+    try:
+        return parse_guardian_excel(input_path, validation_report=validation_report)
+    except ExcelValidationError as error:
+        report_note = f"；校验报告: {error.report_path}" if error.report_path else ""
+        raise SystemExit(f"Excel 校验失败，共 {len(error.errors)} 个错误{report_note}\n{error}") from error
+
+
+def cmd_excel(args):
+    report_path = getattr(args, "validation_report", None) or _default_validation_report(
+        args.input,
+        args.output,
+    )
+    plan = _parse_excel(args.input, report_path)
+    _write_plan(plan, args.output)
+    _print_summary(plan)
+    print(f"Excel validation report: {os.path.abspath(report_path)}")
+
+
 def cmd_guardian(args):
     plan = _load_plan(args.input)
     plan = _apply_user_group_mapping(plan, args)
@@ -89,6 +120,13 @@ def cmd_migrate(args):
         except ImportError:
             from sentry_sql_to_ir import parse_sentry_export
         plan = parse_sentry_export(args.source_input)
+    elif args.source == "excel":
+        report_path = getattr(args, "validation_report", None) or _default_validation_report(
+            args.source_input,
+            args.output,
+        )
+        plan = _parse_excel(args.source_input, report_path)
+        print(f"Excel validation report: {os.path.abspath(report_path)}")
     else:
         print(f"Unknown source type: {args.source}", file=sys.stderr)
         sys.exit(1)
@@ -267,6 +305,7 @@ def _plan_to_dict(plan) -> dict:
     return {
         "source_metadata": plan.source_metadata,
         "users": sorted(plan.users),
+        "user_profiles": plan.user_profiles,
         "groups": sorted(plan.groups),
         "roles": sorted(plan.roles),
         "role_group_assignments": {k: sorted(v) for k, v in plan.role_group_assignments.items()},
@@ -301,6 +340,10 @@ def _plan_from_dict(d: dict):
     plan = MigrationPlan()
     plan.source_metadata = d.get("source_metadata", {})
     plan.users = set(d.get("users", []))
+    plan.user_profiles = {
+        name: {str(key): str(value) for key, value in profile.items()}
+        for name, profile in d.get("user_profiles", {}).items()
+    }
     plan.groups = set(d.get("groups", []))
     plan.roles = set(d.get("roles", []))
     plan.role_group_assignments = {k: set(v) for k, v in d.get("role_group_assignments", {}).items()}
@@ -428,6 +471,12 @@ def main():
     p_sentry.add_argument("--output", "-o")
     _add_user_filter_args(p_sentry)
 
+    # guardian excel
+    p_excel = sub.add_parser("excel", help="Parse Guardian batch Excel template to IR")
+    p_excel.add_argument("--input", "-i", required=True)
+    p_excel.add_argument("--output", "-o")
+    p_excel.add_argument("--validation-report", help="Excel 行级校验报告 JSON")
+
     # guardian
     p_guardian = sub.add_parser("guardian", help="Generate Guardian API script from IR")
     p_guardian.add_argument("--input", "-i", required=True)
@@ -440,7 +489,7 @@ def main():
 
     # migrate (end-to-end)
     p_migrate = sub.add_parser("migrate", help="Full migration: source -> IR -> Guardian script")
-    p_migrate.add_argument("--source", required=True, choices=["ranger", "sentry"])
+    p_migrate.add_argument("--source", required=True, choices=["ranger", "sentry", "excel"])
     p_migrate.add_argument("--source-input", required=True)
     p_migrate.add_argument("--output", "-o")
     p_migrate.add_argument("--base-url")
@@ -448,6 +497,7 @@ def main():
     p_migrate.add_argument("--hive-component")
     p_migrate.add_argument("--hdfs-component")
     p_migrate.add_argument("--save-ir", help="Save intermediate IR to file")
+    p_migrate.add_argument("--validation-report", help="Excel 行级校验报告 JSON")
     _add_user_filter_args(p_migrate)
 
     args = parser.parse_args()
@@ -456,6 +506,8 @@ def main():
         cmd_ranger(args)
     elif args.command == "sentry":
         cmd_sentry(args)
+    elif args.command == "excel":
+        cmd_excel(args)
     elif args.command == "guardian":
         cmd_guardian(args)
     elif args.command == "migrate":

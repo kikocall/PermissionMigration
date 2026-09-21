@@ -121,6 +121,7 @@ class MigrationPlan:
     """The complete set of entities to migrate."""
     policies: list[Policy] = field(default_factory=list)
     users: set[str] = field(default_factory=set)
+    user_profiles: dict[str, dict[str, str]] = field(default_factory=dict)
     groups: set[str] = field(default_factory=set)
     roles: set[str] = field(default_factory=set)
     role_group_assignments: dict[str, set[str]] = field(default_factory=dict)

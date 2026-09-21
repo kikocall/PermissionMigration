@@ -91,10 +91,11 @@ def _gen_users(plan: MigrationPlan, base_url: str, access_token: str) -> list[st
     """Generate create-user commands."""
     lines: list[str] = []
     for user_name in sorted(plan.users):
+        profile = plan.user_profiles.get(user_name, {})
         body = {
-            "userEmail": f"{user_name}{DEFAULT_USER_DOMAIN}",
+            "userEmail": profile.get("email") or f"{user_name}{DEFAULT_USER_DOMAIN}",
             "userName": user_name,
-            "userPassword": DEFAULT_USER_PASSWORD,
+            "userPassword": profile.get("initial_password") or DEFAULT_USER_PASSWORD,
         }
         url = _token_url(base_url, ENDPOINT_USERS, access_token)
         lines.append(_curl_cmd("POST", url, body))
